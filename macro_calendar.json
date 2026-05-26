@@ -1,0 +1,412 @@
+[
+  {
+    "_note": "Macro calendar for Kronos Trading System. Updated by human weekly. Module 3 applies a symmetric ±4H blackout around each event timestamp. Timestamps are UTC Unix seconds. Verify all dates before each event — especially FOMC/CPI/NFP which may shift due to US federal holidays.",
+    "name": "_METADATA",
+    "timestamp": 0,
+    "type": "meta",
+    "notes": "Do not delete this entry. Ignored by MacroCalendar (timestamp=0 is never within 4H of current time in normal operation)."
+  },
+
+  {
+    "name": "FOMC Rate Decision — June 2026",
+    "timestamp": 1781719200,
+    "type": "fomc",
+    "notes": "Jun 17 2026 14:00 EDT (18:00 UTC). Fed rate decision + press conference. High crypto volatility expected."
+  },
+  {
+    "name": "US CPI Release — May 2026",
+    "timestamp": 1781181000,
+    "type": "cpi",
+    "notes": "Jun 11 2026 08:30 EDT (12:30 UTC). May 2026 CPI print."
+  },
+  {
+    "name": "US Non-Farm Payrolls — June 2026",
+    "timestamp": 1780662600,
+    "type": "nfp",
+    "notes": "Jun 5 2026 08:30 EDT (12:30 UTC). May 2026 payrolls data."
+  },
+  {
+    "name": "RBI MPC Rate Decision — June 2026",
+    "timestamp": 1780720200,
+    "type": "rbi_mpc",
+    "notes": "Jun 6 2026 10:00 IST (04:30 UTC). RBI Monetary Policy Committee announcement."
+  },
+
+  {
+    "name": "US Non-Farm Payrolls — July 2026",
+    "timestamp": 1783081800,
+    "type": "nfp",
+    "notes": "Jul 3 2026 08:30 EDT (12:30 UTC). June 2026 payrolls data."
+  },
+  {
+    "name": "US CPI Release — June 2026",
+    "timestamp": 1784118600,
+    "type": "cpi",
+    "notes": "Jul 15 2026 08:30 EDT (12:30 UTC). June 2026 CPI print."
+  },
+  {
+    "name": "FOMC Rate Decision — July 2026",
+    "timestamp": 1785348000,
+    "type": "fomc",
+    "notes": "Jul 29 2026 14:00 EDT (18:00 UTC). Fed rate decision + press conference."
+  },
+
+  {
+    "name": "US Non-Farm Payrolls — August 2026",
+    "timestamp": 1786105800,
+    "type": "nfp",
+    "notes": "Aug 7 2026 08:30 EDT (12:30 UTC). July 2026 payrolls data."
+  },
+  {
+    "name": "US CPI Release — July 2026",
+    "timestamp": 1786537800,
+    "type": "cpi",
+    "notes": "Aug 12 2026 08:30 EDT (12:30 UTC). July 2026 CPI print."
+  },
+  {
+    "name": "RBI MPC Rate Decision — August 2026",
+    "timestamp": 1786077000,
+    "type": "rbi_mpc",
+    "notes": "Aug 7 2026 10:00 IST (04:30 UTC). RBI MPC announcement."
+  },
+  {
+    "name": "Jackson Hole Economic Symposium — 2026",
+    "timestamp": 1787932800,
+    "type": "jackson_hole",
+    "notes": "Aug 28 2026 10:00 MDT (16:00 UTC). Fed Chair keynote — typically market-moving for risk assets."
+  },
+
+  {
+    "name": "US Non-Farm Payrolls — September 2026",
+    "timestamp": 1788525000,
+    "type": "nfp",
+    "notes": "Sep 4 2026 08:30 EDT (12:30 UTC). August 2026 payrolls data."
+  },
+  {
+    "name": "US CPI Release — August 2026",
+    "timestamp": 1789043400,
+    "type": "cpi",
+    "notes": "Sep 10 2026 08:30 EDT (12:30 UTC). August 2026 CPI print."
+  },
+  {
+    "name": "FOMC Rate Decision — September 2026",
+    "timestamp": 1789581600,
+    "type": "fomc",
+    "notes": "Sep 16 2026 14:00 EDT (18:00 UTC). Fed rate decision + press conference."
+  },
+
+  {
+    "name": "US Non-Farm Payrolls — October 2026",
+    "timestamp": 1790944200,
+    "type": "nfp",
+    "notes": "Oct 2 2026 08:30 EDT (12:30 UTC). September 2026 payrolls data."
+  },
+  {
+    "name": "RBI MPC Rate Decision — October 2026",
+    "timestamp": 1791520200,
+    "type": "rbi_mpc",
+    "notes": "Oct 9 2026 10:00 IST (04:30 UTC). RBI MPC announcement."
+  },
+  {
+    "name": "US CPI Release — September 2026",
+    "timestamp": 1791981000,
+    "type": "cpi",
+    "notes": "Oct 14 2026 08:30 EDT (12:30 UTC). September 2026 CPI print."
+  },
+  {
+    "name": "FOMC Rate Decision — October 2026",
+    "timestamp": 1793210400,
+    "type": "fomc",
+    "notes": "Oct 28 2026 14:00 EDT (18:00 UTC). Fed rate decision + press conference."
+  },
+
+  {
+    "name": "US Non-Farm Payrolls — November 2026",
+    "timestamp": 1793971800,
+    "type": "nfp",
+    "notes": "Nov 6 2026 08:30 EST (13:30 UTC). October 2026 payrolls data. Note: EST after DST ends Nov 1."
+  },
+  {
+    "name": "US CPI Release — October 2026",
+    "timestamp": 1794490200,
+    "type": "cpi",
+    "notes": "Nov 12 2026 08:30 EST (13:30 UTC). October 2026 CPI print."
+  },
+
+  {
+    "name": "US Non-Farm Payrolls — December 2026",
+    "timestamp": 1796391000,
+    "type": "nfp",
+    "notes": "Dec 4 2026 08:30 EST (13:30 UTC). November 2026 payrolls data."
+  },
+  {
+    "name": "RBI MPC Rate Decision — December 2026",
+    "timestamp": 1796445000,
+    "type": "rbi_mpc",
+    "notes": "Dec 5 2026 10:00 IST (04:30 UTC). RBI MPC announcement."
+  },
+  {
+    "name": "US CPI Release — November 2026",
+    "timestamp": 1796909400,
+    "type": "cpi",
+    "notes": "Dec 10 2026 08:30 EST (13:30 UTC). November 2026 CPI print."
+  },
+  {
+    "name": "FOMC Rate Decision — December 2026",
+    "timestamp": 1796842800,
+    "type": "fomc",
+    "notes": "Dec 9 2026 14:00 EST (19:00 UTC). Last Fed meeting of 2026."
+  },
+
+  {
+    "name": "India Union Budget 2027",
+    "timestamp": 1801459800,
+    "type": "india_budget",
+    "notes": "Feb 1 2027 11:00 IST (05:30 UTC). Annual Union Budget — major INR and crypto market mover."
+  },
+  {
+    "name": "US Non-Farm Payrolls — January 2027",
+    "timestamp": 1799415000,
+    "type": "nfp",
+    "notes": "Jan 8 2027 08:30 EST (13:30 UTC). December 2026 payrolls. Delayed from Jan 1 (New Year holiday)."
+  },
+  {
+    "name": "FOMC Rate Decision — January 2027",
+    "timestamp": 1801076400,
+    "type": "fomc",
+    "notes": "Jan 27 2027 14:00 EST (19:00 UTC). First Fed meeting of 2027."
+  },
+  {
+    "name": "US CPI Release — December 2026",
+    "timestamp": 1799933400,
+    "type": "cpi",
+    "notes": "Jan 14 2027 08:30 EST (13:30 UTC). December 2026 CPI print."
+  },
+
+  {
+    "name": "US Non-Farm Payrolls — February 2027",
+    "timestamp": 1801834200,
+    "type": "nfp",
+    "notes": "Feb 5 2027 08:30 EST (13:30 UTC). January 2027 payrolls data."
+  },
+  {
+    "name": "RBI MPC Rate Decision — February 2027",
+    "timestamp": 1801888200,
+    "type": "rbi_mpc",
+    "notes": "Feb 6 2027 10:00 IST (04:30 UTC). RBI MPC announcement."
+  },
+  {
+    "name": "US CPI Release — January 2027",
+    "timestamp": 1802352600,
+    "type": "cpi",
+    "notes": "Feb 11 2027 08:30 EST (13:30 UTC). January 2027 CPI print."
+  },
+
+  {
+    "name": "US Non-Farm Payrolls — March 2027",
+    "timestamp": 1804253400,
+    "type": "nfp",
+    "notes": "Mar 5 2027 08:30 EST (13:30 UTC). February 2027 payrolls data."
+  },
+  {
+    "name": "US CPI Release — February 2027",
+    "timestamp": 1804771800,
+    "type": "cpi",
+    "notes": "Mar 11 2027 08:30 EST (13:30 UTC). February 2027 CPI print."
+  },
+  {
+    "name": "FOMC Rate Decision — March 2027",
+    "timestamp": 1805306400,
+    "type": "fomc",
+    "notes": "Mar 17 2027 14:00 EDT (18:00 UTC). Fed rate decision + press conference. DST starts Mar 14."
+  },
+
+  {
+    "name": "US Non-Farm Payrolls — April 2027",
+    "timestamp": 1806669000,
+    "type": "nfp",
+    "notes": "Apr 2 2027 08:30 EDT (12:30 UTC). March 2027 payrolls data."
+  },
+  {
+    "name": "RBI MPC Rate Decision — April 2027",
+    "timestamp": 1807331400,
+    "type": "rbi_mpc",
+    "notes": "Apr 10 2027 10:00 IST (04:30 UTC). RBI MPC announcement."
+  },
+  {
+    "name": "US CPI Release — March 2027",
+    "timestamp": 1807705800,
+    "type": "cpi",
+    "notes": "Apr 14 2027 08:30 EDT (12:30 UTC). March 2027 CPI print."
+  },
+
+  {
+    "name": "US Non-Farm Payrolls — May 2027",
+    "timestamp": 1809693000,
+    "type": "nfp",
+    "notes": "May 7 2027 08:30 EDT (12:30 UTC). April 2027 payrolls data."
+  },
+  {
+    "name": "US CPI Release — April 2027",
+    "timestamp": 1810211400,
+    "type": "cpi",
+    "notes": "May 13 2027 08:30 EDT (12:30 UTC). April 2027 CPI print."
+  },
+  {
+    "name": "FOMC Rate Decision — May 2027",
+    "timestamp": 1809540000,
+    "type": "fomc",
+    "notes": "May 5 2027 14:00 EDT (18:00 UTC). Fed rate decision + press conference."
+  },
+
+  {
+    "name": "US Non-Farm Payrolls — June 2027",
+    "timestamp": 1812112200,
+    "type": "nfp",
+    "notes": "Jun 4 2027 08:30 EDT (12:30 UTC). May 2027 payrolls data."
+  },
+  {
+    "name": "RBI MPC Rate Decision — June 2027",
+    "timestamp": 1812256200,
+    "type": "rbi_mpc",
+    "notes": "Jun 6 2027 10:00 IST (04:30 UTC). RBI MPC announcement."
+  },
+  {
+    "name": "US CPI Release — May 2027",
+    "timestamp": 1812630600,
+    "type": "cpi",
+    "notes": "Jun 10 2027 08:30 EDT (12:30 UTC). May 2027 CPI print."
+  },
+  {
+    "name": "FOMC Rate Decision — June 2027",
+    "timestamp": 1813168800,
+    "type": "fomc",
+    "notes": "Jun 16 2027 14:00 EDT (18:00 UTC). Fed rate decision + press conference."
+  },
+
+  {
+    "name": "US Non-Farm Payrolls — July 2027",
+    "timestamp": 1814531400,
+    "type": "nfp",
+    "notes": "Jul 2 2027 08:30 EDT (12:30 UTC). June 2027 payrolls data."
+  },
+  {
+    "name": "US CPI Release — June 2027",
+    "timestamp": 1815568200,
+    "type": "cpi",
+    "notes": "Jul 14 2027 08:30 EDT (12:30 UTC). June 2027 CPI print."
+  },
+  {
+    "name": "FOMC Rate Decision — July 2027",
+    "timestamp": 1816797600,
+    "type": "fomc",
+    "notes": "Jul 28 2027 14:00 EDT (18:00 UTC). Fed rate decision + press conference."
+  },
+
+  {
+    "name": "US Non-Farm Payrolls — August 2027",
+    "timestamp": 1817555400,
+    "type": "nfp",
+    "notes": "Aug 6 2027 08:30 EDT (12:30 UTC). July 2027 payrolls data."
+  },
+  {
+    "name": "US CPI Release — July 2027",
+    "timestamp": 1817987400,
+    "type": "cpi",
+    "notes": "Aug 11 2027 08:30 EDT (12:30 UTC). July 2027 CPI print."
+  },
+  {
+    "name": "RBI MPC Rate Decision — August 2027",
+    "timestamp": 1817526600,
+    "type": "rbi_mpc",
+    "notes": "Aug 6 2027 10:00 IST (04:30 UTC). RBI MPC announcement."
+  },
+  {
+    "name": "Jackson Hole Economic Symposium — 2027",
+    "timestamp": 1819382400,
+    "type": "jackson_hole",
+    "notes": "Aug 27 2027 10:00 MDT (16:00 UTC). Fed Chair keynote."
+  },
+
+  {
+    "name": "US Non-Farm Payrolls — September 2027",
+    "timestamp": 1819974600,
+    "type": "nfp",
+    "notes": "Sep 3 2027 08:30 EDT (12:30 UTC). August 2027 payrolls data."
+  },
+  {
+    "name": "US CPI Release — August 2027",
+    "timestamp": 1820579400,
+    "type": "cpi",
+    "notes": "Sep 10 2027 08:30 EDT (12:30 UTC). August 2027 CPI print."
+  },
+  {
+    "name": "FOMC Rate Decision — September 2027",
+    "timestamp": 1821636000,
+    "type": "fomc",
+    "notes": "Sep 22 2027 14:00 EDT (18:00 UTC). Fed rate decision + press conference."
+  },
+
+  {
+    "name": "US Non-Farm Payrolls — October 2027",
+    "timestamp": 1822393800,
+    "type": "nfp",
+    "notes": "Oct 1 2027 08:30 EDT (12:30 UTC). September 2027 payrolls data."
+  },
+  {
+    "name": "RBI MPC Rate Decision — October 2027",
+    "timestamp": 1822969800,
+    "type": "rbi_mpc",
+    "notes": "Oct 8 2027 10:00 IST (04:30 UTC). RBI MPC announcement."
+  },
+  {
+    "name": "US CPI Release — September 2027",
+    "timestamp": 1823430600,
+    "type": "cpi",
+    "notes": "Oct 13 2027 08:30 EDT (12:30 UTC). September 2027 CPI print."
+  },
+  {
+    "name": "FOMC Rate Decision — October 2027",
+    "timestamp": 1824660000,
+    "type": "fomc",
+    "notes": "Oct 27 2027 14:00 EDT (18:00 UTC). Fed rate decision + press conference."
+  },
+
+  {
+    "name": "US Non-Farm Payrolls — November 2027",
+    "timestamp": 1825417800,
+    "type": "nfp",
+    "notes": "Nov 5 2027 08:30 EDT (12:30 UTC). October 2027 payrolls data. DST ends Nov 7."
+  },
+  {
+    "name": "US CPI Release — October 2027",
+    "timestamp": 1825939800,
+    "type": "cpi",
+    "notes": "Nov 11 2027 08:30 EST (13:30 UTC). October 2027 CPI print."
+  },
+
+  {
+    "name": "US Non-Farm Payrolls — December 2027",
+    "timestamp": 1827840600,
+    "type": "nfp",
+    "notes": "Dec 3 2027 08:30 EST (13:30 UTC). November 2027 payrolls data."
+  },
+  {
+    "name": "RBI MPC Rate Decision — December 2027",
+    "timestamp": 1827894600,
+    "type": "rbi_mpc",
+    "notes": "Dec 4 2027 10:00 IST (04:30 UTC). RBI MPC announcement."
+  },
+  {
+    "name": "US CPI Release — November 2027",
+    "timestamp": 1828445400,
+    "type": "cpi",
+    "notes": "Dec 10 2027 08:30 EST (13:30 UTC). November 2027 CPI print."
+  },
+  {
+    "name": "FOMC Rate Decision — December 2027",
+    "timestamp": 1828292400,
+    "type": "fomc",
+    "notes": "Dec 8 2027 14:00 EST (19:00 UTC). Last Fed meeting of 2027."
+  }
+]

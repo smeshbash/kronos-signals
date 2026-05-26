@@ -1,0 +1,45 @@
+# Kronos Trading System — Python dependencies
+# Install in this order to avoid resolver conflicts:
+#
+#   1. PyTorch (CUDA 12.4 — your driver is 581.83 / CUDA 13.0, backward compatible):
+#      pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+#
+#   2. Everything else:
+#      pip install -r requirements.txt
+#
+# On Linux VPS (CPU-only — Hostinger VPS has no GPU):
+#      pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+#      (model inference on CPU is fast enough for 4H signals; training must be done locally)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Exchange & market data ────────────────────────────────────────────────────
+ccxt>=4.5.54
+
+# ── Async scheduling (all modules) ───────────────────────────────────────────
+APScheduler>=3.11.2
+
+# ── WebSocket (Module 1 — Delta Exchange feed) ───────────────────────────────
+websockets>=12.0
+
+# ── HTTP (Module 1 — REST fallback, funding rate fetch) ──────────────────────
+requests>=2.31.0
+
+# ── Numeric (Module 2 slippage model, train_kronos.py) ───────────────────────
+numpy>=1.26.0
+
+# ── Deep learning (Module 4 inference + train_kronos.py) ─────────────────────
+# NOTE: install torch separately BEFORE this file — see instructions above.
+# torch is listed here so pip freeze / audit tools see the dependency.
+torch>=2.1.0
+
+# ── Telegram bot (Module 10 — [job-queue] required for Application.job_queue) ─
+python-telegram-bot[job-queue]>=21.0
+
+# ── Shadow benchmarking (foundation model inference — vendor/kronos) ──────────
+pandas>=2.0.0
+einops>=0.8.1
+huggingface_hub>=0.21.0
+safetensors>=0.3.0
+
+# ── Live dashboard (Module 12) ────────────────────────────────────────────────
+flask>=3.0.0

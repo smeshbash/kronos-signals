@@ -1,0 +1,67 @@
+# ── Secrets — NEVER commit these ─────────────────────────────────────────────
+.env
+*.env
+.env.*
+
+# ── Database — live data, not code ───────────────────────────────────────────
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# ── Trained model weights — large binary, train locally ──────────────────────
+models/
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.safetensors
+
+# ── Python cache ──────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+ENV/
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── OS noise ──────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+
+# ── Temp / debug scripts (one-off, not part of the codebase) ─────────────────
+debug_*.py
+fix_*.py
+mark_corrupted_data.py
+check_*.py
+verify_*.py
+backfill_*.py
+
+# ── HuggingFace model cache ───────────────────────────────────────────────────
+.cache/
+
+# ── vendor/ and Kronos/ — third-party repos, cloned separately ───────────────
+vendor/
+Kronos/
+
+# ── Claude Code tool settings — local only ───────────────────────────────────
+.claude/
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
