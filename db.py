@@ -11,6 +11,27 @@ from contextlib import contextmanager
 
 DB_PATH = os.environ.get('KRONOS_DB_PATH', os.path.join(os.path.dirname(__file__), 'data', 'kronos.db'))
 
+# ── Pipeline regime versioning ─────────────────────────────────────────────────
+# Bump this when pipeline config changes materially (filters, risk rules, exit
+# logic). All signal generators write this value so benchmark_analysis.py can
+# compare apples-to-apples across a consistent rule set.
+#
+# v1 — original (trailing stop active, 1.17% return floor, no per-model conf gate)
+# v2 — 2026-05-31: trailing stop disabled in paper mode, 2.0% return floor,
+#       kronos-base confidence gate ≥ 0.4
+# v3 — 2026-06-01: PRIMARY DATA — all structural fixes applied:
+#       - TDS = 0% (corrected; futures/options exempt from Section 194S)
+#       - ATR_TP_MULTIPLIER 3.0 → 2.0 (TP at 2×ATR, more achievable)
+#       - ATR_SL_MULTIPLIER 1.5 (unchanged — swing-appropriate)
+#       - MIN_PREDICTED_RETURN_PCT 2.0% → 0.17% (exact cost floor, no quality tax)
+#       - CONSECUTIVE_LOSS_LIMIT 3 → 5 (prevents over-halting at realistic WR)
+#       - Stacking guard active in paper mode (race-condition duplicate fix)
+#       - M15 (kronos-mini-4h) PAUSED — WR 16.7%, negative directional edge
+#       - M16 (kronos-base-4h) PAUSED — WR 22.2%, negative directional edge
+#       - Active models: custom (M4), kronos-mini (M13), kronos-base (M14)
+#       v1 and v2 are historical reference only. v3 is the benchmark dataset.
+SIGNAL_REGIME_VERSION = 3
+
 
 @contextmanager
 def get_connection():
@@ -140,7 +161,7 @@ def init_db() -> None:
             -- | 'drawdown_alert' | 'forced_override' | 'manual'
             pnl_gross        REAL,                  -- P&L before TDS and tax
             pnl_net          REAL,                  -- P&L after TDS deduction
-            tds_deducted     REAL,                  -- 1% of sell notional (auto by exchange)
+            tds_deducted     REAL,                  -- always 0 for futures/options (TDS not applicable; Delta Exchange India does not deduct TDS on derivatives)
             funding_paid     REAL    NOT NULL DEFAULT 0.0,
             funding_received REAL    NOT NULL DEFAULT 0.0,
             fees             REAL,                  -- maker fees + 18% GST
@@ -252,10 +273,12 @@ def init_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_events_type
             ON events(event_type, timestamp DESC);
 
-        -- ── Table 11: Shadow signals ─────────────────────────────────────────
-        -- Predictions from foundation models (kronos-mini, kronos-base) running
-        -- in shadow mode alongside the custom model. Used for week-6 benchmarking.
-        -- Writes here ONLY — never touches signals, trades, or positions tables.
+        -- ── Table 11: Shadow signals (legacy — no longer written) ────────────
+        -- Originally used to log foundation model predictions separately.
+        -- Superseded: M13/M14 now write directly to the shared signals table
+        -- with model_source='kronos-mini'/'kronos-base', enabling unified M5/M6
+        -- processing and per-model accuracy tracking on the dashboard.
+        -- Table retained to avoid migration errors on existing databases.
         CREATE TABLE IF NOT EXISTS shadow_signals (
             id               INTEGER PRIMARY KEY AUTOINCREMENT,
             symbol           TEXT    NOT NULL,
@@ -282,6 +305,67 @@ def init_db() -> None:
         # Values: 'test_artifact' | 'corrupted_bug:<reason>' | 'incomplete_data:<reason>'
         "ALTER TABLE signals ADD COLUMN quality_flag TEXT DEFAULT NULL",
         "ALTER TABLE trades  ADD COLUMN quality_flag TEXT DEFAULT NULL",
+        # model_source — which generator wrote this signal.
+        # 'custom' = KronosForecaster (M4); 'kronos-mini' = M13; 'kronos-base' = M14.
+        # DEFAULT 'custom' keeps all existing M4 signals correct without any M4 change.
+        "ALTER TABLE signals ADD COLUMN model_source TEXT NOT NULL DEFAULT 'custom'",
+        # ATR at entry time — stored by M6 so M7 trailing stop uses the same
+        # volatility reference throughout the position's life.
+        "ALTER TABLE positions ADD COLUMN entry_atr REAL",
+        # Highest mark price seen since entry (long) or lowest (short).
+        # M7 advances this each 15-min cycle; trailing SL trails it by 1 × entry_atr.
+        # Initialised to entry_price by M6.
+        "ALTER TABLE positions ADD COLUMN running_extreme REAL",
+        # Per-model capital tracking (M8 / M6).
+        # NULL  = aggregate snapshot (sum of all models; historical rows keep NULL).
+        # 'custom' | 'kronos-mini' | 'kronos-base' = model-specific snapshot.
+        # Each model has its own KRONOS_STARTING_CAPITAL_INR pool (₹1L by default),
+        # enabling independent capital-growth comparison across the three generators.
+        "ALTER TABLE portfolio_snapshots ADD COLUMN model_source TEXT DEFAULT NULL",
+        # Exchange-side bracket order IDs (live mode only).
+        # NULL in paper mode — M7 WebSocket handles SL/TP for paper positions.
+        # In live mode M6 places a stop-market SL + limit TP as separate reduce-only
+        # orders immediately after entry fills and stores their IDs here.
+        # M7 uses these to: (a) skip redundant WebSocket SL/TP checks, (b) cancel the
+        # surviving leg when the other fills, (c) cancel+replace sl_order_id when the
+        # trailing stop advances.
+        "ALTER TABLE positions ADD COLUMN sl_order_id TEXT DEFAULT NULL",
+        "ALTER TABLE positions ADD COLUMN tp_order_id TEXT DEFAULT NULL",
+        # Pipeline regime version — see SIGNAL_REGIME_VERSION constant.
+        # DEFAULT 1 tags all existing signals as v1 (pre-2026-05-31 rule set).
+        # Generators write the current SIGNAL_REGIME_VERSION on every new signal
+        # so benchmark_analysis.py can compare within a consistent rule set only.
+        "ALTER TABLE signals ADD COLUMN regime_version INTEGER NOT NULL DEFAULT 1",
+        # Horizon exit timestamp — Unix epoch when the model's prediction window ends.
+        # = signal_timestamp + horizon_seconds (e.g. T+24H for 24H-horizon signals).
+        # In paper mode M7 exits the position at this time regardless of P&L,
+        # directly testing what the model actually predicted rather than ATR-based targets.
+        # NULL on positions opened before this column existed (ignored by M7).
+        "ALTER TABLE positions ADD COLUMN horizon_exit_at INTEGER DEFAULT NULL",
+        # Absolute highest mark price seen during the position's life (all directions).
+        # Tracked by M7 _update_position_price on every tick.
+        # NULL until first M7 update — falls back to entry_price in display code.
+        "ALTER TABLE positions ADD COLUMN running_high REAL DEFAULT NULL",
+        # Absolute lowest mark price seen during the position's life (all directions).
+        "ALTER TABLE positions ADD COLUMN running_low  REAL DEFAULT NULL",
+        # Peak (highest) and trough (lowest) mark prices reached during the trade.
+        # Copied from positions.running_high / running_low at exit time so they
+        # survive the position row deletion. NULL for trades closed before this existed.
+        "ALTER TABLE trades ADD COLUMN peak_price   REAL DEFAULT NULL",
+        "ALTER TABLE trades ADD COLUMN trough_price REAL DEFAULT NULL",
+        # Rejection reason — written by M5 when a signal is rejected so the
+        # benchmark can distinguish over-filtering from legitimate blocks.
+        # Values: 'confidence_gate' | 'return_floor' | 'funding_rate' |
+        #         'blackout' | 'entry_cost' | 'position_cap' | 'stacking' |
+        #         'correlation' | other M5 reason strings.
+        # NULL on executed signals and on signals from before this column existed.
+        "ALTER TABLE signals ADD COLUMN rejection_reason TEXT DEFAULT NULL",
+        # Actual return at the signal's horizon — written back by benchmark_analysis
+        # after the OHLCV candle at signal_timestamp + HORIZON_SECONDS is available.
+        # = (close_at_horizon - close_at_signal) / close_at_signal × 100
+        # Positive = price went up. Compare sign against direction for hit/miss.
+        # NULL until resolved.
+        "ALTER TABLE signals ADD COLUMN actual_return_pct REAL DEFAULT NULL",
     ]
     for _sql in _migrations:
         try:
@@ -289,6 +373,39 @@ def init_db() -> None:
             conn.commit()
         except Exception:
             pass  # column already exists — harmless
+
+    # ── Regime change event log ────────────────────────────────────────────────
+    # Writes a single regime_change event the first time this version's init_db
+    # runs. Idempotent — subsequent calls are no-ops.
+    try:
+        already = conn.execute(
+            """SELECT COUNT(*) FROM events
+               WHERE event_type='regime_change'
+                 AND data LIKE ?""",
+            (f'%"version": {SIGNAL_REGIME_VERSION}%',),
+        ).fetchone()[0]
+        if not already:
+            conn.execute(
+                """INSERT INTO events
+                       (module, event_type, severity, message, data, timestamp)
+                   VALUES ('system', 'regime_change', 'info', ?, ?, strftime('%s','now'))""",
+                (
+                    f'Pipeline regime v{SIGNAL_REGIME_VERSION} activated',
+                    json.dumps({
+                        'version': SIGNAL_REGIME_VERSION,
+                        'changes': [
+                            'min_predicted_return_pct=0.02 (raised from 1.17% cost floor)',
+                            'kronos_base_min_confidence=0.4 (blocks 0.0-0.2 band, 39.3% accuracy)',
+                            'trailing_stop_paper_mode=disabled (fixed SL/TP for clean R:R data)',
+                        ],
+                        'note': 'Signals with regime_version < 2 use incompatible pipeline rules '
+                                '— exclude from benchmark comparisons.',
+                    }),
+                ),
+            )
+            conn.commit()
+    except Exception:
+        pass  # events table may not exist yet on first-ever init — harmless
 
     conn.close()
 

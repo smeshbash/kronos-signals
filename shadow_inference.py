@@ -12,6 +12,7 @@ import sys
 import time
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 # Resolve vendor/kronos so 'from model import ...' works without installation.
@@ -205,8 +206,13 @@ class ShadowInference:
         context_len: int,
     ) -> Optional[tuple[str, float, float]]:
         """
-        Calls KronosPredictor.predict() and extracts signal.
+        Calls KronosPredictor.predict_samples() and extracts signal.
         Returns (direction, confidence, predicted_return_pct) or None on error.
+
+        Uses the sample distribution (not the averaged mean) to compute confidence:
+          directional_conf = (p_direction - 0.5) × 2   [0=noise, 1=all samples agree]
+          mag_conf         = min(1.0, |mean_return| / (2 × atr_pct))
+          confidence       = directional_conf × mag_conf
         """
         try:
             ohlcv_df = pd.DataFrame([
@@ -228,7 +234,9 @@ class ShadowInference:
             x_timestamp = pd.Series(pd.to_datetime(ts_unix,   unit='s', utc=True))
             y_timestamp = pd.Series(pd.to_datetime(future_ts, unit='s', utc=True))
 
-            pred_df = predictor.predict(
+            # predict_samples: (sample_count, PRED_LEN, 6) — close is column 3
+            _CLOSE_IDX  = 3
+            raw_samples = predictor.predict_samples(
                 df=ohlcv_df,
                 x_timestamp=x_timestamp,
                 y_timestamp=y_timestamp,
@@ -240,50 +248,59 @@ class ShadowInference:
             )
         except Exception as exc:
             log_event(MODULE, 'error', 'error',
-                      f'{model_name} predict() failed: {exc}')
-            logger.exception('%s predict failed', model_name)
+                      f'{model_name} predict_samples() failed: {exc}')
+            logger.exception('%s predict_samples failed', model_name)
             return None
 
-        return self._extract_signal(pred_df, rows)
+        return self._extract_signal(raw_samples, rows)
 
-    # ── Confidence formula (identical to KronosInference in M4) ─────────────
+    # ── Confidence formula — sample-distribution based ───────────────────────
 
     def _extract_signal(
         self,
-        pred_df: pd.DataFrame,
-        rows:    list[dict],
+        raw_samples: 'np.ndarray',
+        rows:        list[dict],
     ) -> Optional[tuple[str, float, float]]:
         """
         Returns (direction, confidence, predicted_return_pct).
-        Formula is byte-for-byte identical to M4 to ensure comparable scores.
+
+        raw_samples shape: (sample_count, PRED_LEN, 6_features)
+        close column index: 3 (open/high/low/close/vol/amt)
+
+        Confidence is derived from the actual sample distribution — not from
+        the averaged mean, which destroys directional information.
         """
+        _CLOSE_IDX = 3
         try:
-            pred_closes = pred_df['close'].values
+            sample_finals = raw_samples[:, -1, _CLOSE_IDX]   # (sample_count,)
         except Exception:
             return None
 
-        if len(pred_closes) == 0:
+        if len(sample_finals) == 0:
             return None
 
-        current_close = rows[-1]['close']
+        current_close = float(rows[-1]['close'])
         if current_close <= 0:
             return None
 
-        direction            = 'long' if pred_closes[-1] > current_close else 'short'
-        predicted_return     = (pred_closes[-1] - current_close) / current_close
+        n_long    = int(np.sum(sample_finals > current_close))
+        p_long    = n_long / len(sample_finals)
+        direction = 'long' if p_long >= 0.5 else 'short'
+        p_dir     = p_long if direction == 'long' else (1.0 - p_long)
+
+        # directional_conf: 0.0 = pure 50/50 noise, 1.0 = all samples agree
+        directional_conf = (p_dir - 0.5) * 2.0
+
+        mean_final           = float(np.mean(sample_finals))
+        predicted_return     = (mean_final - current_close) / current_close
         predicted_return_pct = predicted_return * 100.0
 
         atr_pct = _compute_atr_pct(rows)
         if atr_pct <= 0:
             atr_pct = abs(predicted_return) if abs(predicted_return) > 0 else 1e-6
 
-        base_conf   = min(1.0, abs(predicted_return) / (2.0 * atr_pct))
-        n_agree     = sum(
-            1 for pc in pred_closes
-            if (pc > current_close) == (direction == 'long')
-        )
-        consistency = n_agree / len(pred_closes)
-        confidence  = round(base_conf * consistency, 4)
+        mag_conf   = min(1.0, abs(predicted_return) / (2.0 * atr_pct))
+        confidence = round(directional_conf * mag_conf, 4)
 
         return direction, confidence, round(predicted_return_pct, 4)
 

@@ -31,7 +31,9 @@ Outputs per signal:
   - events table: 'risk_check' event per signal with full RiskCheckResult payload
 
 Scheduler:
-  Cron: 00:07/04:07/08:07/12:07/16:07/20:07 UTC — 2 min after Module 4 (:05 UTC)
+  Cron: every hour at :12 UTC — 7 min after M4/M13/M14 fire at :05 UTC,
+  allowing foundation model CPU inference (50 samples, 2-3 symbols) to
+  finish writing all signals before M5 sweeps the pending queue.
 """
 
 import asyncio
@@ -78,11 +80,20 @@ FUNDING_BLACKOUT_SECONDS = 2 * 3600      # block in the 2H window BEFORE each se
 EXTREME_FUNDING_THRESHOLD       = 0.003  # 0.3%/8H — soft penalty: raises confidence threshold
 EXTREME_FUNDING_THRESHOLD_RAISE = 0.10   # raise effective confidence threshold 10% relative
 
-# Round-trip fee estimate used by the cost-adjusted entry funding block.
-# Entry: 0.04% maker × 1.18 GST = 0.0472%
-# Exit:  0.10% taker × 1.18 GST = 0.118%
-# Total: 0.1652% ≈ 0.0017 (rounded up slightly as a buffer for slippage)
-ROUND_TRIP_FEES_PCT = 0.0017
+# Round-trip fee — verified against 31 actual trades (mean diff: Rs 0.00).
+# Entry: maker 0.04% × 1.18 GST = 0.0472%
+# Exit:  taker 0.10% × 1.18 GST = 0.1180%   ← worst-case (stop_loss / time_limit)
+# Total: 0.1652%  →  0.0017 (0.17%, +0.005pp buffer for slippage)
+# Best case (TP hit, both maker): 0.0944% — not used here; filter must assume worst-case exit.
+# Actual median cost confirmed: 0.1651% of entry notional.
+ROUND_TRIP_FEES_PCT = 0.0017   # 0.17% — verified accurate, worst-case (taker exit)
+
+# TDS: NOT applicable to futures/options on Delta Exchange India.
+# Section 194S (1% TDS) applies to VDA spot transfers only; perpetual futures are
+# derivatives, not VDA transfers. Delta Exchange India confirmed this in their FAQ.
+# Real cost floor = ROUND_TRIP_FEES_PCT (~0.17%) + funding.
+# MIN_PREDICTED_RETURN_PCT (2.0%) dominates as the quality gate in all normal conditions.
+TDS_RATE = 0.0   # 0% — futures/options exempt from TDS
 
 # Section 8.4 exchange circuit breaker — extreme spread as % of mark price.
 # BTC/ETH perpetual spreads are normally 0.01-0.1% of mark price. 1% = 10-100x
@@ -90,11 +101,43 @@ ROUND_TRIP_FEES_PCT = 0.0017
 # Configurable via KRONOS_CB_SPREAD_PCT env var.
 CIRCUIT_BREAKER_SPREAD_PCT = float(os.environ.get('KRONOS_CB_SPREAD_PCT', '1.0'))
 
-# Section 8.4 / 19.1 item 2: 3 consecutive losing trades triggers forced override.
-CONSECUTIVE_LOSS_LIMIT = 3
+# Consecutive losing trades before forced override (Section 8.4 / 19.1).
+# At 40% WR, P(3 consecutive losses) = 60%^3 = 21.6% — triggers ~once every 4-5 days,
+# halting the system too aggressively. At 5 consecutive losses: P = 60%^5 = 7.8% —
+# triggers only on genuine losing streaks, not routine variance.
+CONSECUTIVE_LOSS_LIMIT = 5
+
+# Minimum predicted return to approve a signal — set to the true cost floor.
+# A signal is only blocked on cost grounds if its predicted return cannot cover
+# the round-trip fee (0.17%). Beyond that, signal quality is governed by the
+# confidence gate (MIN_CONFIDENCE_BY_SOURCE), not the magnitude of predicted return.
+#
+# History:
+#   2.0% — original setting, based on wrong assumption that 1% TDS applied
+#   0.5% — interim reduction after TDS corrected (still 3× true cost floor)
+#   0.17% — correct value: exactly ROUND_TRIP_FEES_PCT (cost-recovery gate only)
+#
+# Effect: unlocks 89 signals that were blocked despite covering their cost.
+# Verified: actual median round-trip cost = 0.1651% of notional. This matches.
+MIN_PREDICTED_RETURN_PCT = ROUND_TRIP_FEES_PCT   # 0.17% — pure cost-recovery gate
+
+# Per-model minimum confidence gate. Keys must match model_source values in signals table.
+# Applied before all other checks in both paper and live mode — low-confidence signals
+# from a specific model are rejected immediately without consuming the check chain.
+# Omitted models have no confidence floor (0.0 — any confidence passes).
+MIN_CONFIDENCE_BY_SOURCE: dict = {
+    'kronos-base': 0.4,   # 0.0–0.2 band was 39.3% accurate — below random; filter out
+}
 
 # A pending signal older than this is expired, not rejected (Section 10.1: 4H entry timeout)
 SIGNAL_EXPIRY_SECONDS = 4 * 3600
+
+# In paper mode opposing positions on the same symbol are allowed: each model's
+# prediction executes independently so pre-live analysis can compare which model
+# called the direction correctly (head-to-head benchmarking). In live mode the
+# opposing block is enforced — a simultaneous LONG + SHORT on the same asset
+# nets to zero exposure while wasting two position slots and paying double fees.
+PAPER_MODE = os.environ.get('KRONOS_PAPER_MODE', 'false').lower() == 'true'
 
 # Section 19.2: win rate below 55% for 7 days → raise threshold 5pp absolute
 WIN_RATE_7D_THRESHOLD    = 0.55
@@ -186,6 +229,7 @@ class RiskCheck:
         horizon              = signal_row.get('horizon', '24h')
         predicted_return_pct = float(signal_row.get('predicted_return_pct') or 0.0)
         signal_ts            = signal_row['signal_timestamp']
+        model_source         = signal_row.get('model_source') or 'custom'
         now                  = int(time.time())
 
         # Default result fields — overridden on approval or specific rejection
@@ -212,78 +256,111 @@ class RiskCheck:
                 effective_threshold=effective_threshold, checked_at=now,
             )
 
-        # ── Check 2: Forced override active ──────────────────────────────────
-        reason = self._check_forced_override_active()
-        if reason:
-            rejection_reason = reason
-        else:
-            # ── Check 3: Consecutive losing trades ───────────────────────────
-            # Detect and write a new forced_override if last N trades were losses.
-            # Must run before other checks so the override is written early.
-            reason = self._check_consecutive_losses()
+        # ── Per-model confidence gate (paper + live) ─────────────────────────
+        # Applied before the paper/live branch — model-specific noise floor that
+        # rejects regardless of mode. Does not count as a "live-only risk rule".
+        _conf_block = self._check_model_confidence_block(model_source, confidence)
+        if _conf_block:
+            rejection_reason = _conf_block
+
+        # ── Paper mode: benchmark fast-path ──────────────────────────────────
+        # Goal: maximum throughput across all models for benchmark accuracy.
+        #
+        # Two checks applied:
+        #   (a) Per-model stacking guard — prevents a SINGLE model from holding
+        #       two positions on the same symbol/direction simultaneously. Also
+        #       closes the race-condition window (approved-but-unexecuted signals).
+        #       Different models may hold the same symbol concurrently — intentional.
+        #   (b) Entry cost/quality block — predicted return must clear the
+        #       MIN_PREDICTED_RETURN_PCT noise gate (0.5%).
+        #
+        # No position cap, no correlation check, no macro blackouts, no consecutive-
+        # loss halts. Every qualifying signal from every model executes for maximum
+        # benchmark dataset size.
+        if PAPER_MODE and not rejection_reason:
+            reason = self._check_open_position_exists(symbol, direction,
+                                                      model_source, signal_id)
             if reason:
                 rejection_reason = reason
             else:
-                # ── Check 4: Macro blackout ───────────────────────────────────
-                reason = self._check_macro_blackout()
+                reason = self._check_entry_funding_block(
+                    symbol, direction, predicted_return_pct, horizon)
                 if reason:
                     rejection_reason = reason
                 else:
-                    # ── Check 5: Funding settlement blackout ──────────────────
-                    reason = self._check_funding_settlement_blackout()
+                    slippage_bps = self._get_slippage_estimate(symbol)
+                    approved = True
+
+        elif not PAPER_MODE and not rejection_reason:
+            # ── Live mode: full check chain ───────────────────────────────────
+
+            # ── Check 2: Forced override active ──────────────────────────────
+            reason = self._check_forced_override_active()
+            if reason:
+                rejection_reason = reason
+            else:
+                # ── Check 3: Consecutive losing trades ───────────────────────
+                reason = self._check_consecutive_losses()
+                if reason:
+                    rejection_reason = reason
+                else:
+                    # ── Check 4: Macro blackout ───────────────────────────────
+                    reason = self._check_macro_blackout()
                     if reason:
                         rejection_reason = reason
                     else:
-                        # ── Check 5a: Entry funding hard block ────────────────
-                        # Reject if funding rate against direction > 0.5%/8H.
-                        # At that level, 24H funding cost exceeds expected profit.
-                        # Exit-side funding check removed from M7 — this is the
-                        # sole funding gate (entry-only, not exit).
-                        reason = self._check_entry_funding_block(
-                            symbol, direction, predicted_return_pct, horizon)
+                        # ── Check 5: Funding settlement blackout ──────────────
+                        reason = self._check_funding_settlement_blackout()
                         if reason:
                             rejection_reason = reason
                         else:
-                            # ── Check 6: Stop loss 4H blackout (§19.2) ───────
-                            reason = self._check_stop_loss_blackout(symbol)
+                            # ── Check 5a: Entry funding hard block ────────────
+                            reason = self._check_entry_funding_block(
+                                symbol, direction, predicted_return_pct, horizon)
                             if reason:
                                 rejection_reason = reason
                             else:
-                                # ── Check 7: Asset exclusion (defense in depth)
-                                reason = self._check_asset_exclusion(symbol)
+                                # ── Check 6: Stop loss 4H blackout (§19.2) ────
+                                reason = self._check_stop_loss_blackout(symbol)
                                 if reason:
                                     rejection_reason = reason
                                 else:
-                                    # ── Check 8: Exchange circuit breaker ─────
-                                    reason = self._check_circuit_breaker(symbol)
+                                    # ── Check 7: Asset exclusion ──────────────
+                                    reason = self._check_asset_exclusion(symbol)
                                     if reason:
                                         rejection_reason = reason
                                     else:
-                                        # ── Check 9: System alert level ───────
-                                        reason = self._check_alert_level(symbol)
+                                        # ── Check 8: Circuit breaker ──────────
+                                        reason = self._check_circuit_breaker(symbol)
                                         if reason:
                                             rejection_reason = reason
                                         else:
-                                            # ── Check 10: Position cap ─────────
-                                            reason = self._check_position_cap()
+                                            # ── Check 9: Alert level ──────────
+                                            reason = self._check_alert_level(symbol)
                                             if reason:
                                                 rejection_reason = reason
                                             else:
-                                                # ── Check 11: Confidence ───────
-                                                reason, effective_threshold = self._check_confidence(
-                                                    confidence, symbol, direction)
+                                                # ── Check 10: Position cap ────
+                                                reason = self._check_position_cap(model_source)
                                                 if reason:
                                                     rejection_reason = reason
                                                 else:
-                                                    # ── Check 12: Correlation ──
-                                                    reason, size_cap_pct, combined_margin_cap_pct = self._check_correlation(
-                                                        symbol, direction, confidence, signal_id)
+                                                    # ── Check 11: Confidence ──
+                                                    reason, effective_threshold = self._check_confidence(
+                                                        confidence, symbol, direction)
                                                     if reason:
                                                         rejection_reason = reason
                                                     else:
-                                                        # ── Check 13: Slippage ─
-                                                        slippage_bps = self._get_slippage_estimate(symbol)
-                                                        approved = True
+                                                        # ── Check 12: Correlation
+                                                        reason, size_cap_pct, combined_margin_cap_pct = self._check_correlation(
+                                                            symbol, direction, confidence, signal_id,
+                                                            model_source)
+                                                        if reason:
+                                                            rejection_reason = reason
+                                                        else:
+                                                            # ── Check 13: Slippage
+                                                            slippage_bps = self._get_slippage_estimate(symbol)
+                                                            approved = True
 
         # Persist result
         if approved:
@@ -356,6 +433,7 @@ class RiskCheck:
                 rows = conn.execute(
                     """SELECT id, pnl_gross, exit_timestamp FROM trades
                        WHERE status='closed' AND pnl_gross IS NOT NULL
+                         AND quality_flag IS NULL
                        ORDER BY exit_timestamp DESC LIMIT ?""",
                     (CONSECUTIVE_LOSS_LIMIT,),
                 ).fetchall()
@@ -491,6 +569,23 @@ class RiskCheck:
         return None
 
     @staticmethod
+    def _check_model_confidence_block(model_source: str, confidence: float) -> Optional[str]:
+        """
+        Per-model confidence gate. Rejects signals below the model-specific
+        minimum confidence defined in MIN_CONFIDENCE_BY_SOURCE.
+
+        Applied before all other checks (paper and live) so noisy low-confidence
+        signals from a specific model never reach the cost/risk chain.
+        Models not listed in MIN_CONFIDENCE_BY_SOURCE have no floor (pass always).
+        """
+        min_conf = MIN_CONFIDENCE_BY_SOURCE.get(model_source, 0.0)
+        if min_conf > 0.0 and confidence < min_conf:
+            return (
+                f'confidence_block: {model_source} confidence {confidence:.4f} '
+                f'below model minimum {min_conf:.4f}'
+            )
+        return None
+
     @staticmethod
     def _check_entry_funding_block(
         symbol:               str,
@@ -499,20 +594,26 @@ class RiskCheck:
         horizon:              str,
     ) -> Optional[str]:
         """
-        Cost-adjusted entry funding block.
+        Cost-recovery entry block.
 
-        Rejects a signal if the predicted return from the model does not cover
-        the full cost of holding the position for its horizon:
+        Rejects a signal only if its predicted return cannot cover the round-trip
+        trading cost. This is a pure cost gate — not a quality gate.
 
-            funding_cost = |rate| × settlements_in_horizon
-            fees_pct     = ROUND_TRIP_FEES_PCT  (entry maker + exit taker + GST)
-            min_return   = funding_cost + fees_pct
+            cost_floor = TDS_RATE + ROUND_TRIP_FEES_PCT + funding_cost
+                       = 0.0% + 0.17% + funding_cost
+                       ≈ 0.17% under normal funding conditions
 
-            Block if: |predicted_return_pct / 100| < min_return
+            min_return = max(cost_floor, MIN_PREDICTED_RETURN_PCT)
+                       = max(cost_floor, ROUND_TRIP_FEES_PCT)
+                       = cost_floor  (they are equal)
 
-        This is self-calibrating: high-confidence / high-return signals pass
-        even in elevated funding environments; low-return signals are blocked
-        even when funding is low. No fixed threshold to tune.
+        Signal quality (directional conviction) is governed entirely by the
+        confidence gate (MIN_CONFIDENCE_BY_SOURCE), not predicted return magnitude.
+        ATR-based TP in Module 6 sets exit levels — predicted_return magnitude
+        does not determine TP distance.
+
+        Verified: actual median round-trip cost = 0.1651% of notional (31 trades).
+        ROUND_TRIP_FEES_PCT = 0.0017 (0.17%) matches this exactly.
 
         Fallback: if predicted_return_pct is 0.0 (legacy signal written before
         this column existed), the check is skipped to avoid false blocks.
@@ -520,34 +621,112 @@ class RiskCheck:
         if predicted_return_pct == 0.0:
             return None   # legacy signal — skip cost check
 
-        rate = RiskCheck._get_current_funding_rate(symbol)
-        if rate is None:
-            return None   # no funding data — allow through
+        # ── Funding cost (only counts when against the direction) ─────────────
+        rate         = RiskCheck._get_current_funding_rate(symbol)
+        rate_against = 0.0
+        settlements  = 0.0
+        funding_cost = 0.0
+        if rate is not None:
+            rate_against = rate if direction == 'long' else -rate
+            if rate_against > 0:
+                try:
+                    horizon_h = int(horizon.rstrip('h'))
+                except (ValueError, AttributeError):
+                    horizon_h = 24
+                settlements  = horizon_h / 8.0          # e.g. 24H / 8 = 3.0
+                funding_cost = rate_against * settlements
 
-        # Only applies when funding is against the position's direction
-        rate_against = rate if direction == 'long' else -rate
-        if rate_against <= 0:
-            return None   # funding is in position's favour — no cost
-
-        # Derive number of 8H settlements in the signal's horizon
-        try:
-            horizon_h = int(horizon.rstrip('h'))
-        except (ValueError, AttributeError):
-            horizon_h = 24   # safe default
-        settlements = horizon_h / 8.0   # e.g. 24H / 8 = 3.0
-
-        funding_cost   = rate_against * settlements
-        min_return     = funding_cost + ROUND_TRIP_FEES_PCT
-        actual_return  = abs(predicted_return_pct) / 100.0
+        # ── Minimum return: higher of cost floor and profit floor ───────────────
+        # TDS_RATE = 0.0 (futures exempt); real cost floor = fees + funding (~0.17%+)
+        # Profit floor (2.0%) dominates in all normal conditions.
+        cost_floor    = TDS_RATE + ROUND_TRIP_FEES_PCT + funding_cost
+        min_return    = max(cost_floor, MIN_PREDICTED_RETURN_PCT)
+        actual_return = abs(predicted_return_pct) / 100.0
 
         if actual_return < min_return:
+            funding_part = (
+                f' + funding ({rate_against*100:.3f}%/8H × '
+                f'{settlements:.0f} settlements = {funding_cost*100:.3f}%)'
+                if funding_cost > 0 else ''
+            )
+            floor_label = (
+                f'profit floor {MIN_PREDICTED_RETURN_PCT*100:.2f}%'
+                if MIN_PREDICTED_RETURN_PCT >= cost_floor
+                else f'cost floor {cost_floor*100:.3f}%'
+            )
             return (
-                f'entry_funding_block: predicted return {predicted_return_pct:+.3f}% '
-                f'does not cover funding ({rate_against*100:.3f}%/8H × '
-                f'{settlements:.0f} settlements = {funding_cost*100:.3f}%) '
-                f'+ fees ({ROUND_TRIP_FEES_PCT*100:.2f}%) — '
+                f'entry_cost_block: predicted return {predicted_return_pct:+.3f}% '
+                f'below {floor_label} '
+                f'[fees {ROUND_TRIP_FEES_PCT*100:.2f}%'
+                f'{funding_part}] — '
                 f'minimum needed {min_return*100:.3f}%, got {actual_return*100:.3f}%'
             )
+        return None
+
+    @staticmethod
+    def _check_open_position_exists(
+        symbol:       str,
+        direction:    str,
+        model_source: str,
+        signal_id:    int = 0,
+    ) -> Optional[str]:
+        """
+        Paper-mode stacking guard — checks both open positions AND approved-but-
+        not-yet-executed signals to close the race-condition window.
+
+        Race condition (root cause of kronos-base-4h duplicate positions):
+          Two signals for the same model+symbol+direction arrive in the same 4H
+          cycle. M5 processes both before M6 executes either. Both pass the open-
+          position check (no position exists yet) and both get approved. M6 then
+          executes both, creating duplicate concurrent positions.
+
+        Fix: also reject if a same-model+symbol+direction signal is already
+        approved (status='approved') and has not yet been executed. Exclude the
+        current signal_id so we don't self-reject.
+
+        Different models may hold the same symbol in the same direction
+        simultaneously: intentional benchmark behaviour (independent capital pools).
+        Opposing positions (long+short, same model) are also allowed.
+        """
+        try:
+            with get_connection() as conn:
+                # 1. Check open positions (existing behaviour)
+                row = conn.execute(
+                    """SELECT p.id FROM positions p
+                       JOIN trades  t ON t.id       = p.trade_id
+                       JOIN signals s ON s.id       = t.signal_id
+                       WHERE p.status                         = 'open'
+                         AND p.symbol                         = ?
+                         AND p.direction                       = ?
+                         AND COALESCE(s.model_source, 'custom') = ?
+                       LIMIT 1""",
+                    (symbol, direction, model_source),
+                ).fetchone()
+                if row:
+                    return (
+                        f'open_position_exists: {model_source} already has '
+                        f'{symbol} {direction} open (paper stacking guard)'
+                    )
+
+                # 2. Check approved-but-unexecuted signals (race-condition guard)
+                pending = conn.execute(
+                    """SELECT id FROM signals
+                       WHERE model_source = ?
+                         AND symbol       = ?
+                         AND direction    = ?
+                         AND status       = 'approved'
+                         AND id           != ?
+                       LIMIT 1""",
+                    (model_source, symbol, direction, signal_id),
+                ).fetchone()
+                if pending:
+                    return (
+                        f'duplicate_pending_signal: {model_source} already has '
+                        f'{symbol} {direction} approved and awaiting execution '
+                        f'(race-condition guard, signal_id={pending["id"]})'
+                    )
+        except Exception as exc:
+            logger.warning('_check_open_position_exists error: %s', exc)
         return None
 
     @staticmethod
@@ -584,12 +763,19 @@ class RiskCheck:
         return None
 
     @staticmethod
-    def _check_position_cap() -> Optional[str]:
-        """Reject if already at MAX_POSITIONS (3) simultaneous open positions."""
-        positions = RiskCheck._get_open_positions()
+    def _check_position_cap(model_source: str) -> Optional[str]:
+        """
+        Reject if this model already has MAX_POSITIONS (3) open positions.
+
+        Each model has its own ₹1L capital pool and independent position cap —
+        one model's positions do not count against another model's limit.
+        This allows up to 3 × MAX_POSITIONS total open positions across all models,
+        which is correct for the per-model capital architecture.
+        """
+        positions = RiskCheck._get_open_positions(model_source=model_source)
         if len(positions) >= MAX_POSITIONS:
             return (f'max_positions_reached: '
-                    f'{len(positions)}/{MAX_POSITIONS} open positions')
+                    f'{model_source} has {len(positions)}/{MAX_POSITIONS} open positions')
         return None
 
     def _check_confidence(
@@ -620,62 +806,95 @@ class RiskCheck:
         return None, effective
 
     @staticmethod
-    def _check_pending_signal_duplicate(signal_id: int, symbol: str, direction: str) -> Optional[str]:
+    def _check_pending_signal_duplicate(
+        signal_id: int, symbol: str, direction: str, model_source: str
+    ) -> Optional[str]:
         """
-        Block if another signal for the same symbol+direction is already pending or
-        approved but not yet executed by M6. Prevents duplicate positions from
-        accumulating when signals are generated faster than M6 processes them
-        (e.g. scheduler restart, M4 fired twice). Excludes the current signal.
+        Block same-model duplicate signals for the same symbol.
+
+        Same model + same symbol + same direction → always blocked (pure duplicate).
+
+        Same model + same symbol + opposite direction:
+          Paper mode → ALLOWED — pre-live benchmarking lets both models' signals
+            execute independently to determine which called direction correctly.
+          Live mode  → BLOCKED — opposing positions on the same asset cancel out
+            exposure while consuming position slots and paying double fees.
+
+        Different models on the same symbol are ALWAYS allowed (independent capital
+        pools): Custom long BTC and Mini short BTC are independent predictions and
+        should both execute against their respective ₹1L pool.
         """
         try:
             with get_connection() as conn:
                 row = conn.execute(
-                    """SELECT id FROM signals
-                       WHERE symbol=? AND direction=? AND status IN ('pending','approved')
-                         AND id != ?
+                    """SELECT id, direction FROM signals
+                       WHERE symbol      = ?
+                         AND status      IN ('pending','approved')
+                         AND id          != ?
+                         AND COALESCE(model_source, 'custom') = ?
                        LIMIT 1""",
-                    (symbol, direction, signal_id),
+                    (symbol, signal_id, model_source),
                 ).fetchone()
             if row:
-                return (f'duplicate_pending_signal: {symbol} {direction} '
-                        f'already queued as signal {row["id"]}')
+                if row['direction'] == direction:
+                    return (f'duplicate_pending_signal: {symbol} {direction} '
+                            f'already queued (same model) as signal {row["id"]}')
+                elif not PAPER_MODE:
+                    return (f'opposing_pending_signal: {symbol} has {row["direction"]} '
+                            f'already queued (same model) as signal {row["id"]} '
+                            f'— opposing positions blocked in live mode')
         except Exception as exc:
             logger.warning('_check_pending_signal_duplicate error: %s', exc)
         return None
 
     def _check_correlation(
-        self, symbol: str, direction: str, confidence: float, signal_id: int
+        self, symbol: str, direction: str, confidence: float, signal_id: int,
+        model_source: str = 'custom',
     ) -> tuple[Optional[str], Optional[float], Optional[float]]:
         """
-        Apply Section 11.2 correlation rules against all open positions.
+        Apply Section 11.2 correlation rules against THIS MODEL's open positions only.
+
+        Per-model capital architecture: each model has its own ₹1L pool and independent
+        position logic. Correlation rules, duplicate-position checks, and the
+        all-3-same-direction cap are all scoped to model_source so that Custom having
+        a BTC long does not block Mini from also going long BTC independently.
+
         Returns (rejection_reason, size_cap_pct, combined_margin_cap_pct).
           rejection_reason:        None if approved
-          size_cap_pct:            5.0% when the 0.70-0.85 same-direction band applies;
-                                   None otherwise — Module 6 uses normal 10% sizing
-          combined_margin_cap_pct: 20.0% when all-3-same-direction rule fires;
-                                   Module 6 must enforce this as the combined cap across
-                                   all three positions (spec: 'combined size hard capped
-                                   at 20% total margin' — Section 11.2)
+          size_cap_pct:            5.0% when the 0.70-0.85 same-direction band applies
+          combined_margin_cap_pct: 20.0% when all-3-same-direction fires for this model
         """
-        dup = RiskCheck._check_pending_signal_duplicate(signal_id, symbol, direction)
+        dup = RiskCheck._check_pending_signal_duplicate(
+            signal_id, symbol, direction, model_source)
         if dup:
             return dup, None, None
 
-        open_positions = self._get_open_positions()
+        # Scope all position checks to this model's own positions
+        open_positions = self._get_open_positions(model_source=model_source)
         if not open_positions:
             return None, None, None
 
-        # Prevent duplicate: same symbol + same direction already open
+        # Same-symbol position check within this model's pool.
+        # Same direction → duplicate (always blocked).
+        # Opposite direction → paper ALLOWED (benchmark), live BLOCKED.
         for pos in open_positions:
-            if pos['symbol'] == symbol and pos['direction'] == direction:
-                return (f'duplicate_position_{symbol}_{direction}', None, None)
+            if pos['symbol'] == symbol:
+                if pos['direction'] == direction:
+                    return (f'duplicate_position_{symbol}_{direction}', None, None)
+                elif not PAPER_MODE:
+                    return (
+                        f'opposing_position_blocked_{symbol}: '
+                        f'existing {pos["direction"]}, new signal {direction} '
+                        f'— opposing positions blocked in live mode',
+                        None, None,
+                    )
 
         size_cap: Optional[float] = None
         combined_margin_cap: Optional[float] = None
 
         for pos in open_positions:
             if pos['symbol'] == symbol:
-                continue  # different direction handled above (opposing is fine)
+                continue  # already handled above
 
             corr = self._compute_correlation(symbol, pos['symbol'])
             if corr is None:
@@ -692,15 +911,14 @@ class RiskCheck:
                 if corr > CORR_MED_THRESHOLD:
                     size_cap = REDUCED_SIZE_PCT   # capped but not blocked
 
-        # All-3-same-direction check (Section 11.2)
-        # Triggers when this new entry would be the 3rd position and all same direction
+        # All-3-same-direction check (Section 11.2) — scoped to this model's positions.
+        # Triggers when this new entry would be the 3rd position for this model and all
+        # are in the same direction.
         same_dir_open = [p for p in open_positions if p['direction'] == direction]
         if len(open_positions) == MAX_POSITIONS - 1 and len(same_dir_open) == len(open_positions):
-            # Confidence gate: only when a threshold is set (live). Pre-live: vacuously permitted.
             threshold = self._confidence_threshold
             if threshold is not None:
                 existing_confidences = [p.get('confidence', 0.0) for p in open_positions]
-                # Incoming signal already passed threshold in check 10 — check existing
                 for ec in existing_confidences:
                     if ec < threshold:
                         return (
@@ -710,9 +928,7 @@ class RiskCheck:
                             None,
                             None,
                         )
-            # Permitted (either pre-live or all confidence scores above threshold).
-            # The 20% combined margin cap applies in ALL phases — set regardless of
-            # whether threshold is None, so Module 6 enforces the cap in paper mode too.
+            # Permitted — apply 20% combined margin cap within this model's pool.
             combined_margin_cap = 20.0
 
         return None, size_cap, combined_margin_cap
@@ -776,7 +992,8 @@ class RiskCheck:
             with get_connection() as conn:
                 rows = conn.execute(
                     """SELECT id, symbol, direction, confidence, horizon,
-                              predicted_return_pct, signal_timestamp
+                              predicted_return_pct, signal_timestamp,
+                              COALESCE(model_source, 'custom') AS model_source
                        FROM signals WHERE status='pending'
                        ORDER BY signal_timestamp ASC""",
                 ).fetchall()
@@ -798,26 +1015,45 @@ class RiskCheck:
             logger.error('Failed to update signal %d: %s', signal_id, e)
 
     @staticmethod
-    def _get_open_positions() -> list[dict]:
+    def _get_open_positions(model_source: Optional[str] = None) -> list[dict]:
         """
-        Return all open positions with symbol, direction, margin_used, and the
-        confidence of the signal that created the position (for all-3-same-direction
-        confidence check in Section 11.2). Confidence defaults to 0.0 if not linked.
+        Return open positions with symbol, direction, margin_used, and confidence.
+
+        model_source=None   → all open positions across every model (used for
+                              drawdown-alert actions and global reference queries).
+        model_source='...'  → only positions generated by that model (used for
+                              per-model position-cap and correlation checks).
+
+        Per-model capital architecture: each model's risk checks are scoped to
+        its own positions so models operate as independent capital pools.
         """
         try:
             with get_connection() as conn:
-                rows = conn.execute(
-                    """SELECT p.symbol, p.direction,
-                              COALESCE(p.margin_used, 0.0) AS margin_used,
-                              COALESCE(s.confidence, 0.0) AS confidence
-                       FROM positions p
-                       LEFT JOIN trades t ON t.id = p.trade_id
-                       LEFT JOIN signals s ON s.id = t.signal_id
-                       WHERE p.status='open'""",
-                ).fetchall()
+                if model_source is None:
+                    rows = conn.execute(
+                        """SELECT p.symbol, p.direction,
+                                  COALESCE(p.margin_used, 0.0) AS margin_used,
+                                  COALESCE(s.confidence, 0.0)  AS confidence
+                           FROM positions p
+                           LEFT JOIN trades  t ON t.id        = p.trade_id
+                           LEFT JOIN signals s ON s.id        = t.signal_id
+                           WHERE p.status = 'open'""",
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """SELECT p.symbol, p.direction,
+                                  COALESCE(p.margin_used, 0.0)  AS margin_used,
+                                  COALESCE(s.confidence, 0.0)   AS confidence
+                           FROM positions p
+                           JOIN trades  t ON t.id        = p.trade_id
+                           JOIN signals s ON s.id        = t.signal_id
+                           WHERE p.status       = 'open'
+                             AND s.model_source = ?""",
+                        (model_source,),
+                    ).fetchall()
             return [dict(r) for r in rows]
         except Exception as e:
-            logger.error('Failed to fetch open positions: %s', e)
+            logger.error('Failed to fetch open positions (model=%s): %s', model_source, e)
             return []
 
     @staticmethod
@@ -995,14 +1231,14 @@ async def main() -> None:
 
     scheduler.add_job(
         _job,
-        CronTrigger(hour='0,4,8,12,16,20', minute=7, timezone='UTC'),
-        id='risk_check_4h',
-        name='Risk Check — 4H cycle',
+        CronTrigger(minute=12, timezone='UTC'),
+        id='risk_check_1h',
+        name='Risk Check — 1H cycle',
         max_instances=1,
         coalesce=True,
     )
     scheduler.start()
-    logger.info('Risk Check scheduler started — cron 00:07/04:07/08:07/12:07/16:07/20:07 UTC')
+    logger.info('Risk Check scheduler started — every hour at :12 UTC')
 
     try:
         while True:

@@ -52,6 +52,11 @@ CCXT_SYMBOLS  = {k: v['ccxt'] for k, v in ASSETS.items()}
 OHLCV_BACKFILL_LIMIT = 500
 OHLCV_TIMEFRAME      = '4h'
 
+# 2100 candles × 1H = ~87 days backfilled on startup.
+# Kronos-mini needs 2048; +52 buffer covers any gaps.
+OHLCV_1H_BACKFILL_LIMIT = 2100
+OHLCV_1H_TIMEFRAME      = '1h'
+
 # ── Logging ────────────────────────────────────────────────────────────────────
 
 logging.basicConfig(
@@ -226,6 +231,52 @@ class DataCollector:
 
     # ── Job: OHLCV collection (cron: candle-close-aligned) ────────────────────
 
+    async def job_collect_ohlcv_1h(self) -> None:
+        """
+        Fetch latest 1H OHLCV candles for all 5 assets via CCXT REST.
+        Scheduled at :02 past every hour — 2 minutes after each 1H candle close.
+        Kronos-mini (M13) and Kronos-base (M14) read from this data at full context.
+        """
+        loop = asyncio.get_running_loop()
+        total_stored = 0
+
+        for asset, ccxt_sym in CCXT_SYMBOLS.items():
+            delta_sym = ASSETS[asset]['delta']
+            try:
+                candles = await loop.run_in_executor(
+                    None,
+                    lambda s=ccxt_sym: self.exchange.fetch_ohlcv(
+                        s, OHLCV_1H_TIMEFRAME, limit=OHLCV_1H_BACKFILL_LIMIT
+                    ),
+                )
+
+                rows = [
+                    (delta_sym, OHLCV_1H_TIMEFRAME, c[0] // 1000,
+                     c[1], c[2], c[3], c[4], c[5])
+                    for c in candles
+                ]
+
+                with get_connection() as conn:
+                    conn.executemany(
+                        """INSERT OR IGNORE INTO ohlcv
+                           (symbol, timeframe, timestamp, open, high, low, close, volume)
+                           VALUES (?,?,?,?,?,?,?,?)""",
+                        rows,
+                    )
+
+                total_stored += len(rows)
+                log.info('OHLCV 1H %s: %d candles', asset, len(rows))
+
+            except Exception as exc:
+                log.error('OHLCV 1H fetch failed for %s: %s', asset, exc)
+                log_event(MODULE, 'error', 'ohlcv_error',
+                          f'OHLCV 1H fetch failed for {asset}',
+                          {'asset': asset, 'timeframe': '1h', 'error': str(exc)})
+
+        log_event(MODULE, 'info', 'heartbeat',
+                  f'OHLCV 1H cycle complete: {total_stored} rows across 5 assets',
+                  {'total_rows': total_stored, 'timeframe': OHLCV_1H_TIMEFRAME})
+
     async def job_collect_ohlcv(self) -> None:
         """
         Fetch latest 4H OHLCV candles for all 5 assets via CCXT REST.
@@ -300,7 +351,11 @@ class DataCollector:
                     None,
                     lambda sym=delta_sym: _rest_get(f'/v2/tickers/{sym}')['result'],
                 )
-                rate = float(data['funding_rate'])
+                # Delta India API returns funding_rate as a percentage value
+                # (e.g. 0.0100 means 0.0100%/8H).  Convert to decimal fraction
+                # (0.0001 = 0.01%) so M5's thresholds (EXTREME_FUNDING_THRESHOLD=0.003
+                # = 0.3%/8H, ROUND_TRIP_FEES_PCT=0.0017 = 0.17%) are on the same scale.
+                rate = float(data['funding_rate']) / 100.0
 
                 with get_connection() as conn:
                     conn.execute(
@@ -441,8 +496,11 @@ class DataCollector:
         log_event(MODULE, 'info', 'info', 'Module 1 startup — database initialised')
 
         # 2. Initial fetches
-        log.info('Running initial OHLCV backfill...')
+        log.info('Running initial 4H OHLCV backfill...')
         await self.job_collect_ohlcv()
+
+        log.info('Running initial 1H OHLCV backfill (2100 candles for foundation models)...')
+        await self.job_collect_ohlcv_1h()
 
         log.info('Running initial funding rate fetch...')
         await self.job_collect_funding_rates()
@@ -477,13 +535,23 @@ class DataCollector:
             misfire_grace_time=60,
         )
 
-        # OHLCV: 2 min after each 4H candle close (Section 7.1).
+        # OHLCV 4H: 2 min after each 4H candle close (Section 7.1).
         self._scheduler.add_job(
             self.job_collect_ohlcv,
             'cron', hour='0,4,8,12,16,20', minute=2,
             id='ohlcv_collect',
             max_instances=1,
             misfire_grace_time=300,
+        )
+
+        # OHLCV 1H: 2 min after every 1H candle close — feeds Kronos-mini (M13) and
+        # Kronos-base (M14) which run at :05 past each hour.
+        self._scheduler.add_job(
+            self.job_collect_ohlcv_1h,
+            'cron', minute=2,
+            id='ohlcv_collect_1h',
+            max_instances=1,
+            misfire_grace_time=120,
         )
 
         # Funding rates: 2 min after each 8H settlement window.

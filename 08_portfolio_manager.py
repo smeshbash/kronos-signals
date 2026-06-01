@@ -35,6 +35,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from db import get_connection, init_db, log_event
+from tax_utils import incremental_tax, effective_reserve_rate, SECTION_87A_LIMIT
 
 log = logging.getLogger(__name__)
 MODULE = 'portfolio_manager'
@@ -43,6 +44,12 @@ MODULE = 'portfolio_manager'
 
 STARTING_CAPITAL_INR      = float(os.environ.get('KRONOS_STARTING_CAPITAL_INR', '100000.0'))
 USD_INR_RATE              = float(os.environ.get('KRONOS_USD_INR_RATE', '84.0'))
+
+# Each model has its own STARTING_CAPITAL_INR pool (Rs 1L each).
+# Aggregate portfolio base = STARTING_CAPITAL_INR × len(_MODELS) = Rs 5L total.
+# All 5 models active from regime v3 — v3 is the primary benchmark dataset.
+_MODELS: tuple[str, ...] = ('custom', 'kronos-mini', 'kronos-base',
+                             'kronos-mini-4h', 'kronos-base-4h')
 PAPER_MODE                = os.environ.get('KRONOS_PAPER_MODE', 'false').lower() == 'true'
 PHASE                     = os.environ.get('KRONOS_PHASE', 'pre_live')
 MONTHLY_FIXED_COSTS_INR   = float(os.environ.get('KRONOS_MONTHLY_FIXED_COSTS_INR', '915.0'))
@@ -145,21 +152,23 @@ class PortfolioManager:
 
     def _compute_portfolio_value(self) -> tuple[float, float, float, int]:
         """
-        Returns (total_value_inr, active_margin_inr, unrealised_pnl_inr, open_count).
+        Returns (total_value_inr, active_margin_inr, unrealised_pnl_inr, open_count)
+        for the AGGREGATE portfolio (sum of all three model pools).
 
-        total_value = STARTING_CAPITAL + sum(closed trades pnl_gross)
-                    + sum(open positions unrealised_pnl)
+        total_value = len(_MODELS) × STARTING_CAPITAL + sum(clean closed pnl_gross)
+                    + sum(open unrealised_pnl)
 
-        Funding accumulation is not included here — precise funding accounting
-        is Module 9's responsibility. §9.4 constraint: the most recent settled
-        funding rate is available only after Module 1 runs at :02 past each 8H
-        settlement; this method is safe to call at any time because it reads
-        positions.unrealised_pnl (written by Module 7) not the raw funding table.
+        Funding accumulation is not included — Module 9's responsibility.
         """
         with get_connection() as conn:
             row = conn.execute(
-                "SELECT COALESCE(SUM(pnl_gross), 0.0) AS total FROM trades WHERE status='closed'"
+                """SELECT COALESCE(SUM(COALESCE(pnl_net, pnl_gross)), 0.0) AS total
+                   FROM trades
+                   WHERE status='closed' AND quality_flag IS NULL"""
             ).fetchone()
+            # Use pnl_net (after TDS + fees + funding_paid) when M9 has processed
+            # the trade; fall back to pnl_gross for trades closed in the last minute
+            # that M9 has not yet processed (pnl_net IS NULL).
             closed_pnl: float = float(row['total']) if row else 0.0
 
             row2 = conn.execute(
@@ -172,20 +181,87 @@ class PortfolioManager:
             active_margin:  float = float(row2['margin'])  if row2 else 0.0
             open_count:     int   = int(row2['cnt'])        if row2 else 0
 
-        total_value = STARTING_CAPITAL_INR + closed_pnl + unrealised_pnl
+        # Each model has its own ₹1L pool — aggregate base = STARTING_CAPITAL × 3
+        total_value = len(_MODELS) * STARTING_CAPITAL_INR + closed_pnl + unrealised_pnl
         return total_value, active_margin, unrealised_pnl, open_count
 
-    def _get_peak_value(self) -> float:
+    def _compute_portfolio_value_for_model(
+        self, model_source: str
+    ) -> tuple[float, float, float, int]:
         """
-        Read the highest peak_value ever stored in portfolio_snapshots.
-        Returns STARTING_CAPITAL_INR when no snapshot exists yet.
+        Returns (total_value_inr, active_margin_inr, unrealised_pnl_inr, open_count)
+        for a single model's ₹1L capital pool.
+
+        Traces trades and positions back to their originating signal via the
+        signal_id → signals.model_source JOIN chain — no schema changes to
+        trades or positions are required.
         """
         with get_connection() as conn:
             row = conn.execute(
-                'SELECT COALESCE(MAX(peak_value), ?) AS peak FROM portfolio_snapshots',
-                (STARTING_CAPITAL_INR,)
+                """SELECT COALESCE(SUM(COALESCE(t.pnl_net, t.pnl_gross)), 0.0) AS total
+                   FROM trades t
+                   JOIN signals s ON t.signal_id = s.id
+                   WHERE t.status        = 'closed'
+                     AND t.quality_flag IS NULL
+                     AND s.model_source  = ?""",
+                (model_source,),
             ).fetchone()
-        return float(row['peak']) if row and row['peak'] else STARTING_CAPITAL_INR
+            # pnl_net preferred (TDS + fees + funding_paid already deducted by M9);
+            # falls back to pnl_gross for trades M9 has not yet processed.
+            closed_pnl: float = float(row['total']) if row else 0.0
+
+            row2 = conn.execute(
+                """SELECT COALESCE(SUM(p.unrealised_pnl), 0.0) AS upnl,
+                          COALESCE(SUM(p.margin_used),    0.0) AS margin,
+                          COUNT(*)                              AS cnt
+                   FROM positions p
+                   JOIN trades t  ON p.trade_id  = t.id
+                   JOIN signals s ON t.signal_id = s.id
+                   WHERE p.status       = 'open'
+                     AND s.model_source = ?""",
+                (model_source,),
+            ).fetchone()
+            unrealised_pnl: float = float(row2['upnl'])  if row2 else 0.0
+            active_margin:  float = float(row2['margin']) if row2 else 0.0
+            open_count:     int   = int(row2['cnt'])       if row2 else 0
+
+        total_value = STARTING_CAPITAL_INR + closed_pnl + unrealised_pnl
+        return total_value, active_margin, unrealised_pnl, open_count
+
+    def _get_peak_value(self, model_source: Optional[str] = None) -> float:
+        """
+        Read the highest peak_value ever stored in portfolio_snapshots.
+
+        model_source=None  → aggregate peak; default = len(_MODELS) × STARTING_CAPITAL_INR.
+        model_source='...' → per-model peak; default = STARTING_CAPITAL_INR.
+
+        Stale-snapshot guard: aggregate snapshots written before per-model tracking
+        was introduced have peak_value ≈ ₹1L (single-model era). Any aggregate peak
+        below 1.5 × STARTING_CAPITAL_INR is treated as stale and ignored so the
+        drawdown baseline resets correctly to ₹3L from the first new snapshot.
+        """
+        fallback = (STARTING_CAPITAL_INR if model_source
+                    else len(_MODELS) * STARTING_CAPITAL_INR)
+        try:
+            with get_connection() as conn:
+                if model_source is None:
+                    row = conn.execute(
+                        'SELECT COALESCE(MAX(peak_value), 0) AS peak'
+                        ' FROM portfolio_snapshots WHERE model_source IS NULL'
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        'SELECT COALESCE(MAX(peak_value), 0) AS peak'
+                        ' FROM portfolio_snapshots WHERE model_source = ?',
+                        (model_source,),
+                    ).fetchone()
+            peak = float(row['peak']) if row and row['peak'] else 0.0
+            # Stale-snapshot guard for aggregate: pre-per-model rows had ≈₹1L peak
+            if model_source is None and 0 < peak < 1.5 * STARTING_CAPITAL_INR:
+                return fallback
+            return peak if peak > 0 else fallback
+        except Exception:
+            return fallback
 
     def _estimate_accumulated_funding_inr(self) -> float:
         """
@@ -556,32 +632,42 @@ class PortfolioManager:
     def _write_portfolio_snapshot(
         self, total_value: float, active_margin: float, unrealised_pnl: float,
         open_positions: int, drawdown_pct: float, peak_value: float,
+        model_source: Optional[str] = None,
     ) -> None:
+        """
+        Write one portfolio snapshot row.
+        model_source=None  → aggregate snapshot.
+        model_source='...' → per-model snapshot (one of _MODELS).
+        """
         now = int(time.time())
         available_margin = total_value - active_margin
         with get_connection() as conn:
             conn.execute(
                 """INSERT INTO portfolio_snapshots
                    (timestamp, total_value, active_margin, available_margin,
-                    unrealised_pnl, drawdown_pct, peak_value, open_positions, phase)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    unrealised_pnl, drawdown_pct, peak_value, open_positions,
+                    phase, model_source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (now,
                  round(total_value, 2), round(active_margin, 2),
                  round(available_margin, 2), round(unrealised_pnl, 2),
                  round(drawdown_pct, 4), round(peak_value, 2),
-                 open_positions, PHASE)
+                 open_positions, PHASE, model_source)
             )
-        log.info('Portfolio snapshot: value=₹%.2f peak=₹%.2f drawdown=%.2f%% positions=%d',
-                 total_value, peak_value, drawdown_pct, open_positions)
+        tag = model_source or 'aggregate'
+        log.info('Portfolio snapshot [%s]: value=₹%.2f peak=₹%.2f dd=%.2f%% positions=%d',
+                 tag, total_value, peak_value, drawdown_pct, open_positions)
 
     def _get_last_snapshot_value(self) -> float:
         """
-        Return total_value from the most recent portfolio snapshot.
-        Returns 0.0 when no snapshot exists (disables the 10% change trigger).
+        Return total_value from the most recent AGGREGATE portfolio snapshot
+        (model_source IS NULL). Returns 0.0 when none exists, disabling the
+        10%-change extra-snapshot trigger until the first aggregate snapshot is written.
         """
         with get_connection() as conn:
             row = conn.execute(
-                'SELECT total_value FROM portfolio_snapshots ORDER BY id DESC LIMIT 1'
+                'SELECT total_value FROM portfolio_snapshots'
+                ' WHERE model_source IS NULL ORDER BY id DESC LIMIT 1'
             ).fetchone()
         return float(row['total_value']) if row and row['total_value'] else 0.0
 
@@ -638,7 +724,8 @@ class PortfolioManager:
                 """SELECT COALESCE(SUM(pnl_gross), 0.0)                    AS gross,
                           COALESCE(SUM(COALESCE(pnl_net, pnl_gross)), 0.0) AS net_or_gross
                    FROM trades
-                   WHERE status='closed'
+                   WHERE status          = 'closed'
+                     AND quality_flag    IS NULL
                      AND exit_timestamp >= ? AND exit_timestamp <= ?""",
                 (month_start, month_end)
             ).fetchone()
@@ -663,11 +750,33 @@ class PortfolioManager:
                      month_label, benchmark_pnl)
             return
 
-        # §11.4 allocation formula — always on gross_pnl per spec
-        tax_reserve_credit = round(gross_pnl * 0.30, 2)   # 30% of gross
-        net_profit         = round(gross_pnl * 0.70, 2)   # gross − tax_reserve
-        system_retention   = round(net_profit * 0.20, 2)  # 20% of net
-        human_withdrawal   = round(net_profit * 0.80, 2)  # 80% of net
+        # §11.4 Dynamic tax reserve — based on actual Indian slab rate, not flat 30%.
+        # Futures/options: speculative income, no TDS. Tax = 0% until total income
+        # (base + YTD trading profit) exceeds Rs 12L Section 87A rebate cliff.
+        # Reserve is computed as incremental tax on this month's profit given YTD context.
+        base_income = float(os.environ.get('KRONOS_BASE_INCOME_INR', '0'))
+        fy_start_ts = int(datetime(
+            now_utc.year if now_utc.month >= 4 else now_utc.year - 1,
+            4, 1, tzinfo=timezone.utc
+        ).timestamp())
+        with get_connection() as conn:
+            ytd_rows = conn.execute(
+                """SELECT COALESCE(SUM(pnl_gross + funding_received - funding_paid), 0.0)
+                          AS ytd_taxable
+                   FROM trades
+                   WHERE status='closed' AND pnl_net IS NOT NULL
+                     AND exit_timestamp >= ? AND exit_timestamp <= ?""",
+                (fy_start_ts, month_end)
+            ).fetchone()
+        ytd_taxable    = float(ytd_rows['ytd_taxable'])
+        ytd_before     = ytd_taxable - max(0.0, gross_pnl)  # YTD before this month
+        tax_reserve_credit = incremental_tax(ytd_before, ytd_taxable, base_income)
+        reserve_rate       = effective_reserve_rate(ytd_taxable, base_income)
+
+        # §11.4 allocation formula
+        net_profit       = round(gross_pnl - tax_reserve_credit, 2)
+        system_retention = round(net_profit * 0.20, 2)   # 20% of net
+        human_withdrawal = round(net_profit * 0.80, 2)   # 80% of net
 
         # Write credit to tax_reserve table (§11.4 — earmarked for ITR, non-tradeable)
         with get_connection() as conn:
@@ -681,7 +790,9 @@ class PortfolioManager:
                    (transaction_type, amount, balance_after, reference_trade_id, notes, timestamp)
                    VALUES ('reserve', ?, ?, NULL, ?, ?)""",
                 (tax_reserve_credit, new_balance,
-                 f'Monthly reserve credit — {month_label}', int(time.time()))
+                 f'Monthly reserve credit — {month_label} '
+                 f'(rate {reserve_rate:.1%}, base_income Rs{base_income:.0f})',
+                 int(time.time()))
             )
 
         cumulative_withdrawn   = self._get_cumulative_withdrawals()
@@ -695,6 +806,10 @@ class PortfolioManager:
                    'benchmark_pnl':            round(benchmark_pnl, 2),
                    'fixed_costs':              MONTHLY_FIXED_COSTS_INR,
                    'tax_reserve_credit':       tax_reserve_credit,
+                   'tax_reserve_rate':         reserve_rate,
+                   'base_income_inr':          base_income,
+                   'ytd_taxable_income':       round(ytd_taxable, 2),
+                   'section_87a_limit':        SECTION_87A_LIMIT,
                    'net_profit':               net_profit,
                    'system_retention':         system_retention,
                    'human_withdrawal':         human_withdrawal,
@@ -703,10 +818,10 @@ class PortfolioManager:
                    'recuperation_pct':         recuperation_pct,
                    'recuperation_remaining':   recuperation_remaining,
                    'accumulated_funding_est':  round(accumulated_funding, 2)})
-        log.info('Monthly calc %s: gross=₹%.2f tax_reserve=₹%.2f '
+        log.info('Monthly calc %s: gross=₹%.2f tax_reserve=₹%.2f (rate %.1f%%) '
                  'human_withdrawal=₹%.2f recuperation=%.1f%%',
                  month_label, gross_pnl, tax_reserve_credit,
-                 human_withdrawal, recuperation_pct)
+                 reserve_rate * 100, human_withdrawal, recuperation_pct)
 
         # §11.4 / §11.5 recuperation milestones
         new_total = cumulative_withdrawn + human_withdrawal
@@ -828,17 +943,32 @@ class PortfolioManager:
                         self._write_level_event_only(new_level, drawdown_pct, total_value)
                 self._current_alert_level = new_level
 
-            # §11.3: 4H boundary snapshot + extra snapshot on >=10% value change
+            # §11.3: 4H boundary snapshot + extra snapshot on >=10% aggregate change.
+            # When writing, always emit one aggregate row (model_source=None) plus
+            # one per-model row for each of the three model capital pools.
             should_snap = self._should_write_4h_snapshot()
             if not should_snap:
                 last_val = self._get_last_snapshot_value()
                 if last_val > 0 and abs(total_value - last_val) / last_val >= 0.10:
                     should_snap = True
             if should_snap:
+                # Aggregate snapshot (model_source=None)
                 self._write_portfolio_snapshot(
                     total_value, active_margin, unrealised_pnl,
                     open_count, drawdown_pct, new_peak,
+                    model_source=None,
                 )
+                # Per-model snapshots — each model has its own ₹1L pool
+                for _msrc in _MODELS:
+                    mv, mm, mu, mc = self._compute_portfolio_value_for_model(_msrc)
+                    mpeak    = self._get_peak_value(model_source=_msrc)
+                    mnew_peak = max(mpeak, mv)
+                    mdd      = (max(0.0, (mnew_peak - mv) / mnew_peak * 100)
+                                if mnew_peak > 0 else 0.0)
+                    self._write_portfolio_snapshot(
+                        mv, mm, mu, mc, mdd, mnew_peak,
+                        model_source=_msrc,
+                    )
 
             now_utc = datetime.fromtimestamp(time.time(), tz=timezone.utc)
 
@@ -848,7 +978,7 @@ class PortfolioManager:
             if self._is_first_cycle_of_week() and not self._rr_alert_already_run_this_week():
                 self._run_rr_check(now_utc)
 
-            log.debug('Cycle: value=₹%.2f peak=₹%.2f dd=%.2f%% level=%s funding_est=₹%.2f',
+            log.debug('Cycle [aggregate]: value=₹%.2f peak=₹%.2f dd=%.2f%% level=%s funding_est=₹%.2f',
                       total_value, new_peak, drawdown_pct, self._current_alert_level,
                       accumulated_funding)
 

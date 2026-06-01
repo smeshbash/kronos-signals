@@ -303,7 +303,8 @@ class HealthMonitor:
                 "SELECT COUNT(*) AS total, "
                 "SUM(CASE WHEN pnl_gross > 0 THEN 1 ELSE 0 END) AS wins, "
                 "MIN(exit_timestamp) AS oldest_ts "
-                "FROM trades WHERE status = 'closed' AND exit_timestamp > ?",
+                "FROM trades WHERE status = 'closed' AND exit_timestamp > ? "
+                "AND quality_flag IS NULL",
                 (cutoff,)
             ).fetchone()
         if row is None:
@@ -426,6 +427,7 @@ class HealthMonitor:
                 "SUM(CASE WHEN pnl_gross > 0 THEN 1 ELSE 0 END) AS wins, "
                 "MIN(exit_timestamp) AS oldest_ts "
                 "FROM trades WHERE status = 'closed' AND exit_timestamp > ? "
+                "AND quality_flag IS NULL "
                 "GROUP BY symbol",
                 (cutoff,)
             ).fetchall()
@@ -491,6 +493,7 @@ class HealthMonitor:
                 "SUM(CASE WHEN pnl_gross > 0 THEN 1 ELSE 0 END) AS wins, "
                 "MIN(exit_timestamp) AS oldest_ts "
                 "FROM trades WHERE status = 'closed' AND exit_timestamp > ? "
+                "AND quality_flag IS NULL "
                 "GROUP BY symbol",
                 (cutoff,)
             ).fetchall()

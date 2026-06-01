@@ -74,7 +74,7 @@ import time
 from dataclasses import asdict, dataclass
 from typing import Optional
 
-from db import get_connection, init_db, log_event
+from db import get_connection, init_db, log_event, SIGNAL_REGIME_VERSION
 
 try:
     from shadow_inference import ShadowInference
@@ -716,11 +716,11 @@ class SignalGenerator:
             cur = conn.execute(
                 """INSERT INTO signals
                        (symbol, direction, confidence, horizon, status,
-                        predicted_return_pct, signal_timestamp)
-                   VALUES (?, ?, ?, ?, 'pending', ?, ?)""",
+                        predicted_return_pct, signal_timestamp, regime_version)
+                   VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)""",
                 (signal.symbol, signal.direction, signal.confidence,
                  signal.horizon, signal.predicted_return_pct,
-                 signal.signal_timestamp),
+                 signal.signal_timestamp, SIGNAL_REGIME_VERSION),
             )
             return cur.lastrowid
 
