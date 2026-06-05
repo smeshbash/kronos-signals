@@ -1,0 +1,21 @@
+# Shell scripts MUST have LF line endings — CRLF breaks bash on Linux
+*.sh        text eol=lf
+Makefile    text eol=lf
+
+# Supervisor config and templates — LF for Linux
+*.conf              text eol=lf
+*.conf.template     text eol=lf
+supervisor.conf.template text eol=lf
+
+# Python files — platform default (LF preferred)
+*.py        text eol=lf
+
+# Windows-only scripts — CRLF on Windows, LF elsewhere
+*.ps1       text eol=crlf
+
+# Binary / model weights — no line-ending conversion
+*.pt        binary
+*.pth       binary
+*.ckpt      binary
+*.bin       binary
+*.safetensors binary
