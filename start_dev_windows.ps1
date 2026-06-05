@@ -29,14 +29,14 @@ if (Test-Path $envFile) {
     Write-Host "WARNING: .env not found at $envFile"
 }
 
-# ── Model status — Regime v3 clean start (2026-06-01) ────────────────────────
-# ALL 5 MODELS ACTIVE — Rs 1L capital each, regime v3 is primary benchmark data.
-# v1/v2 data archived for reference only. All structural fixes applied.
+# ── Model status — Regime v4 (2026-06-05) ────────────────────────────────────
+# 4 MODELS ACTIVE — Rs 1L capital each. Regime v4: regime filter live, M4 halted.
+# Benchmark model: kronos-base-4h. v1/v2/v3 data archived for reference only.
 $Modules = @{
     1  = @{ Name = "Data Collection";       Script = "01_data_collection.py";    Enabled = $true  }
     2  = @{ Name = "Slippage Model";         Script = "02_slippage_model.py";     Enabled = $true  }
     3  = @{ Name = "Macro Calendar";         Script = "03_macro_calendar.py";     Enabled = $true  }
-    4  = @{ Name = "Signal Generator";       Script = "04_signal_generator.py";   Enabled = $true  }
+    4  = @{ Name = "Signal Generator";       Script = "04_signal_generator.py";   Enabled = $false } # HALTED 2026-06-05: -431 Rs/trade expectancy, 91% long-bias, 7% WR on 29 trades — no edge
     5  = @{ Name = "Risk Check";             Script = "05_risk_check.py";         Enabled = $true  }
     6  = @{ Name = "Execution";              Script = "06_execution.py";          Enabled = $true  }
     7  = @{ Name = "Position Monitor";       Script = "07_position_monitor.py";   Enabled = $true  }
@@ -120,7 +120,7 @@ function Start-KronosModule {
 if ($Module -ne 0) {
     Start-KronosModule $Module
 } else {
-    Write-Host "Kronos - starting all modules (regime v3 - all 5 models active, Rs 1L each)"
+    Write-Host "Kronos - starting all modules (regime v4 - 4 models active, custom halted, Rs 1L each)"
     foreach ($num in ($Modules.Keys | Sort-Object)) {
         Start-KronosModule $num
         Start-Sleep -Milliseconds 400

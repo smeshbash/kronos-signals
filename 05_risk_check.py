@@ -125,9 +125,16 @@ MIN_PREDICTED_RETURN_PCT = ROUND_TRIP_FEES_PCT   # 0.17% — pure cost-recovery 
 # Applied before all other checks in both paper and live mode — low-confidence signals
 # from a specific model are rejected immediately without consuming the check chain.
 # Omitted models have no confidence floor (0.0 — any confidence passes).
-MIN_CONFIDENCE_BY_SOURCE: dict = {
-    'kronos-base': 0.4,   # 0.0–0.2 band was 39.3% accurate — below random; filter out
-}
+#
+# 2026-06-05: kronos-base 0.4 floor REMOVED after benchmark analysis (n=373 resolved signals).
+# Data showed the filter was inverted at the boundary:
+#   blocked (<0.4): dir_acc=38.1% (n=291) — blocked signals were MORE directionally accurate
+#   passing (>=0.4): dir_acc=24.4% (n=82)  — passing signals were LESS accurate
+# The 0.4-0.5 band (dir_acc=20%) was the single worst band in the model.
+# Root cause: low-confidence signals skew short (90 shorts in <0.4 range); those shorts
+# performed well in a bear market. Filter was cutting shorts and passing long-biased noise.
+# Fix: no confidence floor. Cost gate (MIN_PREDICTED_RETURN_PCT=0.17%) is the only filter.
+MIN_CONFIDENCE_BY_SOURCE: dict = {}
 
 # A pending signal older than this is expired, not rejected (Section 10.1: 4H entry timeout)
 SIGNAL_EXPIRY_SECONDS = 4 * 3600
@@ -144,6 +151,29 @@ WIN_RATE_7D_THRESHOLD    = 0.55
 WIN_RATE_THRESHOLD_RAISE = 0.05   # 5 percentage points absolute
 WIN_RATE_7D_WINDOW       = 7 * 86400
 MIN_WINRATE_TRADES_7D    = 1      # need at least 1 closed trade (no spec-defined floor; 0 is undefined)
+
+# ── Regime direction filter ────────────────────────────────────────────────────
+# Composite EMA stack on 4H candles. Both conditions must agree before the filter
+# activates — requires structural alignment, not just a brief price dip/spike.
+#
+#   BEAR: close < EMA50  AND  EMA50 < EMA200  → shorts only (longs blocked)
+#   BULL: close > EMA50  AND  EMA50 > EMA200  → longs only  (shorts blocked)
+#   NEUTRAL: price and MAs disagree (transition) → both directions allowed
+#
+# Applies identically in paper and live mode. Rejected signals are written to the
+# DB with rejection_reason='regime_bear_long_blocked' | 'regime_bull_short_blocked'
+# for retrospective validation (actual_return_pct will populate as trades resolve).
+#
+# Disable without code change: set KRONOS_REGIME_FILTER=false in .env
+REGIME_FILTER_ENABLED = os.environ.get('KRONOS_REGIME_FILTER', 'true').lower() == 'true'
+REGIME_EMA_FAST       = 50    # 4H candles ≈ 8 days — medium-term momentum
+REGIME_EMA_SLOW       = 200   # 4H candles ≈ 33 days — structural trend
+REGIME_CANDLES_NEEDED = REGIME_EMA_SLOW + 50   # buffer for EMA seed accuracy
+REGIME_CACHE_TTL      = 900   # 15 min — 4H EMA doesn't change meaningfully intrabar
+
+# Module-level cache: {symbol: (regime, expiry_unix_ts)}
+# Persists across signals within a single M5 run cycle; refreshed every 15 minutes.
+_regime_cache: dict = {}
 
 
 # ── Dataclass ─────────────────────────────────────────────────────────────────
@@ -178,6 +208,19 @@ def _import_macro_calendar():
     except Exception as e:
         logger.warning('Could not import MacroCalendar: %s', e)
         return None
+
+
+# ── EMA helper ────────────────────────────────────────────────────────────────
+
+def _compute_ema(closes: list, period: int) -> float:
+    """EMA seeded with SMA of first `period` values, then exponentially weighted."""
+    if len(closes) < period:
+        return closes[-1] if closes else 0.0
+    k = 2.0 / (period + 1)
+    ema = sum(closes[:period]) / period
+    for price in closes[period:]:
+        ema = price * k + ema * (1.0 - k)
+    return ema
 
 
 # ── RiskCheck class ───────────────────────────────────────────────────────────
@@ -262,6 +305,15 @@ class RiskCheck:
         _conf_block = self._check_model_confidence_block(model_source, confidence)
         if _conf_block:
             rejection_reason = _conf_block
+
+        # ── Regime direction filter (paper + live) ────────────────────────────
+        # Composite EMA50/EMA200 on 4H. Blocks longs in bear, shorts in bull.
+        # Neutral (transition) passes both directions through unchanged.
+        # See REGIME_FILTER_ENABLED, REGIME_EMA_FAST, REGIME_EMA_SLOW constants.
+        if not rejection_reason:
+            _regime_block = self._check_regime_direction_block(symbol, direction)
+            if _regime_block:
+                rejection_reason = _regime_block
 
         # ── Paper mode: benchmark fast-path ──────────────────────────────────
         # Goal: maximum throughput across all models for benchmark accuracy.
@@ -583,6 +635,91 @@ class RiskCheck:
             return (
                 f'confidence_block: {model_source} confidence {confidence:.4f} '
                 f'below model minimum {min_conf:.4f}'
+            )
+        return None
+
+    @staticmethod
+    def _fetch_regime(symbol: str) -> str:
+        """
+        Classify the current market regime for symbol using a composite EMA stack
+        on 4H candles. Returns 'bull', 'bear', or 'neutral'.
+
+        Composite rule — both conditions must agree:
+          BEAR: close < EMA50 AND EMA50 < EMA200
+          BULL: close > EMA50 AND EMA50 > EMA200
+          NEUTRAL: any other configuration (transition / ranging)
+
+        Neutral means the filter does not activate — both directions are allowed.
+        This prevents whipsawing during genuine trend transitions.
+
+        Results are cached for REGIME_CACHE_TTL (15 min) per symbol. Fails open
+        (returns 'neutral') on any DB or computation error so a data gap never
+        silently blocks all trading.
+        """
+        now    = int(time.time())
+        cached = _regime_cache.get(symbol)
+        if cached and now < cached[1]:
+            return cached[0]
+
+        regime = 'neutral'
+        try:
+            with get_connection() as conn:
+                rows = conn.execute(
+                    """SELECT close FROM ohlcv
+                       WHERE symbol=? AND timeframe='4h'
+                       ORDER BY timestamp DESC LIMIT ?""",
+                    (symbol, REGIME_CANDLES_NEEDED),
+                ).fetchall()
+
+            if len(rows) < REGIME_EMA_SLOW + 10:
+                # Insufficient history — fail open
+                _regime_cache[symbol] = ('neutral', now + REGIME_CACHE_TTL)
+                return 'neutral'
+
+            closes   = [float(r['close']) for r in reversed(rows)]
+            ema_fast = _compute_ema(closes, REGIME_EMA_FAST)
+            ema_slow = _compute_ema(closes, REGIME_EMA_SLOW)
+            current  = closes[-1]
+
+            if current < ema_fast and ema_fast < ema_slow:
+                regime = 'bear'
+            elif current > ema_fast and ema_fast > ema_slow:
+                regime = 'bull'
+            # else: neutral (price and MAs disagree — transition)
+
+        except Exception as exc:
+            logger.warning('_fetch_regime failed for %s: %s — failing open', symbol, exc)
+
+        _regime_cache[symbol] = (regime, now + REGIME_CACHE_TTL)
+        return regime
+
+    @staticmethod
+    def _check_regime_direction_block(symbol: str, direction: str) -> Optional[str]:
+        """
+        Regime direction filter. Returns rejection reason or None.
+
+        BEAR regime: blocks longs  (shorts pass through)
+        BULL regime: blocks shorts (longs pass through)
+        NEUTRAL:     no block      (both directions pass)
+
+        Applied before the paper/live branch so it runs identically in both modes.
+        Rejected signals are persisted to the DB with the regime rejection reason,
+        providing a paper trail for retrospective filter validation.
+        """
+        if not REGIME_FILTER_ENABLED:
+            return None
+
+        regime = RiskCheck._fetch_regime(symbol)
+
+        if regime == 'bear' and direction == 'long':
+            return (
+                f'regime_bear_long_blocked: {symbol} close<EMA{REGIME_EMA_FAST}'
+                f'<EMA{REGIME_EMA_SLOW} on 4H — longs blocked in bear regime'
+            )
+        if regime == 'bull' and direction == 'short':
+            return (
+                f'regime_bull_short_blocked: {symbol} close>EMA{REGIME_EMA_FAST}'
+                f'>EMA{REGIME_EMA_SLOW} on 4H — shorts blocked in bull regime'
             )
         return None
 

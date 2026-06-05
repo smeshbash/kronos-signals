@@ -19,18 +19,44 @@ DB_PATH = os.environ.get('KRONOS_DB_PATH', os.path.join(os.path.dirname(__file__
 # v1 — original (trailing stop active, 1.17% return floor, no per-model conf gate)
 # v2 — 2026-05-31: trailing stop disabled in paper mode, 2.0% return floor,
 #       kronos-base confidence gate ≥ 0.4
-# v3 — 2026-06-01: PRIMARY DATA — all structural fixes applied:
-#       - TDS = 0% (corrected; futures/options exempt from Section 194S)
-#       - ATR_TP_MULTIPLIER 3.0 → 2.0 (TP at 2×ATR, more achievable)
-#       - ATR_SL_MULTIPLIER 1.5 (unchanged — swing-appropriate)
-#       - MIN_PREDICTED_RETURN_PCT 2.0% → 0.17% (exact cost floor, no quality tax)
-#       - CONSECUTIVE_LOSS_LIMIT 3 → 5 (prevents over-halting at realistic WR)
-#       - Stacking guard active in paper mode (race-condition duplicate fix)
-#       - M15 (kronos-mini-4h) PAUSED — WR 16.7%, negative directional edge
-#       - M16 (kronos-base-4h) PAUSED — WR 22.2%, negative directional edge
-#       - Active models: custom (M4), kronos-mini (M13), kronos-base (M14)
-#       v1 and v2 are historical reference only. v3 is the benchmark dataset.
-SIGNAL_REGIME_VERSION = 3
+# v3 — 2026-06-01: structural fixes (TDS corrected, TP multiplier 3→2, cost floor
+#       0.17%, consecutive loss limit 3→5, stacking guard, M15/M16 re-enabled mid-run)
+#       Active models: custom (M4), kronos-mini (M13), kronos-base (M14),
+#                      kronos-mini-4h (M15), kronos-base-4h (M16)
+#       v3 data: 187 trades, benchmark analysis completed 2026-06-05.
+#
+# v4 — 2026-06-05: regime-aware pipeline — data-driven overhaul post-benchmark:
+#       - M4 (custom) HALTED: -431 Rs/trade expectancy, 91% long-bias, 7% WR (n=29).
+#         Benchmark data showed no edge in any regime, any symbol, any direction.
+#       - kronos-base 0.4 confidence floor REMOVED: filter was inverted at boundary —
+#         blocked signals had 38.1% dir_acc vs 24.4% for passing signals (n=373).
+#         Root cause: low-conf = shorts (winning in bear), high-conf = longs (losing).
+#       - Regime direction filter ADDED (M5, REGIME_FILTER_ENABLED=True):
+#         Composite EMA50/EMA200 on 4H candles, per-symbol.
+#           BEAR (close < EMA50 < EMA200): longs blocked, shorts pass
+#           BULL (close > EMA50 > EMA200): shorts blocked, longs pass
+#           NEUTRAL (transition): both directions pass
+#         Applied in paper and live mode. Rejected signals persist to DB with
+#         reason='regime_bear_long_blocked' | 'regime_bull_short_blocked' for
+#         retrospective validation as actual_return_pct populates.
+#       - BENCHMARK_MODEL_SOURCE = 'kronos-base-4h': only model with positive
+#         expectancy in v3 (+51 Rs/trade, n=41). Correct directional bias (63% short).
+#         All other models' metrics expressed as deltas vs this benchmark.
+#       - Active models: kronos-mini (M13), kronos-base (M14),
+#                        kronos-mini-4h (M15), kronos-base-4h (M16)
+#       v1/v2/v3 are historical reference. v4 is the current benchmark dataset.
+SIGNAL_REGIME_VERSION = 4
+
+# ── Benchmark model ────────────────────────────────────────────────────────────
+# Set 2026-06-05. Purely an evaluation marker — zero impact on signal generation,
+# risk checks, execution, or position management. Used by analysis scripts to
+# express other models' metrics as deltas relative to this reference model.
+#
+# Rationale: kronos-base-4h is the only model with positive expectancy (+51 Rs/trade)
+# in regime v3 data (n=41 trades). It is also the only model with correct directional
+# bias (63% short) in the current bear regime. All other models are evaluated against
+# its performance as the bar to beat.
+BENCHMARK_MODEL_SOURCE = 'kronos-base-4h'
 
 
 @contextmanager

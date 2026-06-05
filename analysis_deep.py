@@ -3,7 +3,7 @@ Deep benchmark analysis — runs against the live database and prints a full rep
 """
 import sys, time, datetime
 sys.stdout.reconfigure(encoding='utf-8')
-from db import get_connection
+from db import get_connection, BENCHMARK_MODEL_SOURCE
 
 def ts(epoch):
     if not epoch: return '--'
@@ -429,6 +429,135 @@ with get_connection() as conn:
             print(f'    {ts(t["exit_timestamp"])}  {t["symbol"]:8s} {t["direction"]:5s} '
                   f'[{t["model_source"] or "custom":15s}] {result} {rs(t["pnl_gross"] or 0)}  '
                   f'exit={t["exit_reason"] or "?"}')
+
+    # ── 13. BENCHMARK COMPARISON ──────────────────────────────────────────────
+    print(f'\n{SEP}')
+    print(f'  13. BENCHMARK COMPARISON — all models vs {BENCHMARK_MODEL_SOURCE}')
+    print(SEP)
+
+    def model_stats(ts_list):
+        if not ts_list:
+            return None
+        n      = len(ts_list)
+        wins   = [t for t in ts_list if (t['pnl_net'] or 0) > 0]
+        losses = [t for t in ts_list if (t['pnl_net'] or 0) <= 0]
+        wr     = len(wins) / n
+        avg_w  = sum(t['pnl_net'] or 0 for t in wins)   / len(wins)   if wins   else 0
+        avg_l  = sum(t['pnl_net'] or 0 for t in losses) / len(losses) if losses else 0
+        exp    = wr * avg_w + (1 - wr) * avg_l
+        net    = sum(t['pnl_net'] or 0 for t in ts_list)
+        longs  = sum(1 for t in ts_list if t['direction'] == 'long')
+        return dict(n=n, wr=wr, avg_w=avg_w, avg_l=avg_l, exp=exp, net=net,
+                    long_pct=longs/n*100)
+
+    bm_trades = models.get(BENCHMARK_MODEL_SOURCE, [])
+    bm        = model_stats(bm_trades)
+
+    if not bm:
+        print(f'  Benchmark model {BENCHMARK_MODEL_SOURCE} has no closed trades yet.')
+    else:
+        print(f'\n  Benchmark  : {BENCHMARK_MODEL_SOURCE}')
+        print(f'  n={bm["n"]}  WR={bm["wr"]*100:.0f}%  '
+              f'Expect/trade=Rs{bm["exp"]:+.0f}  Net=Rs{bm["net"]:+.0f}  '
+              f'Long%={bm["long_pct"]:.0f}%')
+
+        # Directional accuracy from resolved signals
+        bm_resolved = conn.execute('''
+            SELECT s.direction, s.actual_return_pct
+            FROM signals s
+            WHERE s.model_source = ?
+              AND s.actual_return_pct IS NOT NULL
+              AND (s.quality_flag IS NULL OR s.quality_flag = '')
+        ''', (BENCHMARK_MODEL_SOURCE,)).fetchall()
+        bm_da = None
+        if bm_resolved:
+            bm_correct = sum(
+                1 for s in bm_resolved
+                if (s['direction'] == 'long'  and s['actual_return_pct'] > 0) or
+                   (s['direction'] == 'short' and s['actual_return_pct'] < 0)
+            )
+            bm_da = bm_correct / len(bm_resolved) * 100
+
+        print(f'\n  {"Metric":<22} {"BENCHMARK":>12}', end='')
+        other_models = [m for m in sorted(models.keys()) if m != BENCHMARK_MODEL_SOURCE]
+        for m in other_models:
+            label = m.replace('kronos-', 'k-')
+            print(f'  {label:>14}', end='')
+        print()
+        print(f'  {"-"*22}', end='')
+        print(f'  {"------------":>12}', end='')
+        for _ in other_models:
+            print(f'  {"----------":>14}', end='')
+        print()
+
+        rows_bm = [
+            ('Trades (n)',        f'{bm["n"]}',                    lambda s: (s["n"], s["n"]-bm["n"],         False)),
+            ('Win rate',          f'{bm["wr"]*100:.0f}%',          lambda s: (f'{s["wr"]*100:.0f}%', s["wr"]-bm["wr"], True)),
+            ('Long bias',         f'{bm["long_pct"]:.0f}%',        lambda s: (f'{s["long_pct"]:.0f}%', (s["long_pct"]-bm["long_pct"])/100.0, True)),
+            ('Avg win  (Rs)',      f'{bm["avg_w"]:+.0f}',           lambda s: (f'{s["avg_w"]:+.0f}', s["avg_w"]-bm["avg_w"], False)),
+            ('Avg loss (Rs)',      f'{bm["avg_l"]:+.0f}',           lambda s: (f'{s["avg_l"]:+.0f}', s["avg_l"]-bm["avg_l"], False)),
+            ('Expect/trade (Rs)', f'{bm["exp"]:+.0f}',             lambda s: (f'{s["exp"]:+.0f}', s["exp"]-bm["exp"], False)),
+            ('Net P&L (Rs)',       f'{bm["net"]:+.0f}',             lambda s: (f'{s["net"]:+.0f}', s["net"]-bm["net"], False)),
+        ]
+
+        for label, bm_val, fn in rows_bm:
+            print(f'  {label:<22} {bm_val:>12}', end='')
+            for m in other_models:
+                s = model_stats(models.get(m, []))
+                if not s:
+                    print(f'  {"--":>14}', end='')
+                    continue
+                val, delta, is_pct = fn(s)
+                if is_pct:
+                    d_str = f'Δ{delta*100:+.0f}pp'
+                else:
+                    d_str = f'Δ{delta:+.0f}'
+                cell = f'{val} {d_str}'
+                print(f'  {cell:>14}', end='')
+            print()
+
+        # Dir accuracy row from signals
+        print(f'  {"Dir accuracy":<22}', end='')
+        if bm_da is not None:
+            print(f' {bm_da:>11.1f}%', end='')
+        else:
+            print(f' {"--":>12}', end='')
+        for m in other_models:
+            m_resolved = conn.execute('''
+                SELECT direction, actual_return_pct FROM signals
+                WHERE model_source=? AND actual_return_pct IS NOT NULL
+                  AND (quality_flag IS NULL OR quality_flag='')
+            ''', (m,)).fetchall()
+            if not m_resolved or bm_da is None:
+                print(f'  {"--":>14}', end='')
+                continue
+            m_correct = sum(
+                1 for s in m_resolved
+                if (s['direction'] == 'long'  and s['actual_return_pct'] > 0) or
+                   (s['direction'] == 'short' and s['actual_return_pct'] < 0)
+            )
+            m_da   = m_correct / len(m_resolved) * 100
+            delta  = m_da - bm_da
+            cell   = f'{m_da:.1f}% Δ{delta:+.1f}pp'
+            print(f'  {cell:>14}', end='')
+        print()
+
+        # Verdict row
+        print(f'\n  {"Verdict":<22} {"BENCHMARK":>12}', end='')
+        for m in other_models:
+            s = model_stats(models.get(m, []))
+            if not s:
+                print(f'  {"NO DATA":>14}', end='')
+                continue
+            gap = s['exp'] - bm['exp']
+            if gap >= 0:
+                verdict = 'AHEAD'
+            elif gap >= -100:
+                verdict = 'CLOSE'
+            else:
+                verdict = 'BEHIND'
+            print(f'  {verdict:>14}', end='')
+        print()
 
     print(f'\n{SEP}')
     print('  END OF REPORT')

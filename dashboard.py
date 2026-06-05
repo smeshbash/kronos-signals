@@ -41,11 +41,11 @@ SIG_PAGE_SIZE = 50    # signals explorer rows per page
 
 # Ordered list of known model sources — drives filter chips, cards, analysis views.
 _MODEL_OPTS = [
-    ('custom',         'Custom',   'b-gold',    '#7a5200'),
+    ('custom',         'Custom ⊘', 'b-gold',    '#7a5200'),   # halted 2026-06-05
     ('kronos-mini',    'Mini 1H',  'b-blue',    '#0747a6'),
     ('kronos-base',    'Base 1H',  'b-purple',  '#403294'),
     ('kronos-mini-4h', 'Mini 4H',  'b-teal',    '#087f5b'),
-    ('kronos-base-4h', 'Base 4H',  'b-teal-dk', '#2b8a3e'),
+    ('kronos-base-4h', 'Base 4H ★','b-teal-dk', '#2b8a3e'),   # benchmark model
 ]
 
 # Chart.js line colours for equity curves.
@@ -203,8 +203,8 @@ def _get_filters() -> dict:
         direction = ''
     try:    days    = int(request.args.get('days',    30))
     except: days    = 30
-    try:    regime  = int(request.args.get('regime',   3))
-    except: regime  = 3
+    try:    regime  = int(request.args.get('regime',   4))
+    except: regime  = 4
     try:    page    = max(0, int(request.args.get('page',    0)))
     except: page    = 0
     try:    sigpage = max(0, int(request.args.get('sigpage', 0)))
@@ -286,7 +286,7 @@ def _filter_count(f: dict) -> int:
     n = len(f.get('models', [])) + len(f.get('symbols', []))
     if f.get('direction'):   n += 1
     if f.get('days', 30) != 30:  n += 1
-    if f.get('regime', 3)  != 3: n += 1
+    if f.get('regime', 4)  != 4: n += 1
     return n
 
 
@@ -297,7 +297,7 @@ def _url_with(f: dict, **overrides) -> str:
     if m.get('direction'):
         parts.append(f"direction={m['direction']}")
     parts.append(f"days={m.get('days', 30)}")
-    parts.append(f"regime={m.get('regime', 3)}")
+    parts.append(f"regime={m.get('regime', 4)}")
     if m.get('page', 0):
         parts.append(f"page={m['page']}")
     if m.get('sigpage', 0):
@@ -318,7 +318,7 @@ def _active_filter_desc(f: dict) -> str:
         parts.append(f"Dir: {f['direction'].capitalize()}")
     if f.get('days', 30) != 30:
         parts.append('All time' if f.get('days') == 0 else f"Last {f['days']}d")
-    if f.get('regime', 3) != 3:
+    if f.get('regime', 4) != 4:
         parts.append('All regimes' if f.get('regime') == 0 else f"Regime v{f['regime']}")
     return ' &nbsp;·&nbsp; '.join(parts)
 
@@ -490,11 +490,10 @@ def get_data(f: dict) -> dict:
         return int(_f(v))
 
     _ACC_MODELS = [
-        ('custom',         'Custom',   '24H'),
         ('kronos-mini',    'Mini 1H',  '6H'),
         ('kronos-base',    'Base 1H',  '6H'),
         ('kronos-mini-4h', 'Mini 4H',  '24H'),
-        ('kronos-base-4h', 'Base 4H',  '24H'),
+        ('kronos-base-4h', 'Base 4H ★','24H'),
     ]
     accuracy = []
     for _ms, _lbl, _hz_lbl in _ACC_MODELS:
@@ -702,7 +701,8 @@ body{background:#f4f5f7;font-family:'Segoe UI',system-ui,sans-serif;font-size:.8
 .pill{display:inline-block;padding:2px 10px;border-radius:20px;font-size:.7rem;font-weight:600}
 .pill-paper{background:#fffae6;color:#172b4d;border:1px solid #ffe380}
 .pill-live {background:#ffebe6;color:#bf2600;border:1px solid #ffbdad}
-.pill-phase{background:#f4f5f7;color:#5e6c84;border:1px solid #dfe1e6}
+.pill-phase {background:#f4f5f7;color:#5e6c84;border:1px solid #dfe1e6}
+.pill-regime{background:#e3fcef;color:#006644;border:1px solid #57d9a3}
 
 /* ── Tabs ── */
 .tabs{background:#fff;border-bottom:2px solid #dfe1e6;padding:0 20px;display:flex;gap:0}
@@ -727,7 +727,8 @@ body{background:#f4f5f7;font-family:'Segoe UI',system-ui,sans-serif;font-size:.8
 .chip:hover{background:#f4f5f7}
 .chip input{display:none}
 .chip.on{background:#deebff;border-color:#4c9aff;color:#0052cc}
-.chip-custom.on   {background:#fffae6;border-color:#f0c030;color:#7a5200}
+.chip-custom      {opacity:.55;text-decoration:line-through}
+.chip-custom.on   {background:#fffae6;border-color:#f0c030;color:#7a5200;opacity:.55;text-decoration:line-through}
 .chip-mini1h.on   {background:#deebff;border-color:#4c9aff;color:#0747a6}
 .chip-base1h.on   {background:#eae6ff;border-color:#998dd9;color:#403294}
 .chip-mini4h.on   {background:#e6fcf5;border-color:#36b37e;color:#087f5b}
@@ -1044,7 +1045,7 @@ def _render_filter_bar(f: dict, all_symbols: list) -> str:
         day_opts += f'<option value="{v}"{sel}>{lbl}</option>'
 
     reg_opts = ''
-    for v, lbl in [('3','Regime v3 (primary)'),('2','Regime v2 (secondary)'),('1','Regime v1 (tertiary)'),('0','All regimes')]:
+    for v, lbl in [('4','Regime v4 (current)'),('3','Regime v3 (archive)'),('2','Regime v2 (archive)'),('1','Regime v1 (archive)'),('0','All regimes')]:
         sel = ' selected' if str(f['regime']) == v else ''
         reg_opts += f'<option value="{v}"{sel}>{lbl}</option>'
 
@@ -1772,6 +1773,7 @@ def render(d: dict, f: dict) -> str:
   <span class="topbar-brand">&#9654;&nbsp; KRONOS</span>
   <span class="topbar-right">
     {mode_pill}
+    <span class="pill pill-regime">Regime v4</span>
     <span class="pill pill-phase">{phase_lbl}</span>
     <span>Updated {updated}</span>
     <span style="color:#dfe1e6">|</span>
