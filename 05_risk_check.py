@@ -829,7 +829,10 @@ class RiskCheck:
             with get_connection() as conn:
                 # 1. Check open positions (existing behaviour)
                 row = conn.execute(
-                    """SELECT p.id FROM positions p
+                    """SELECT p.id, p.trade_id, p.entry_price, p.current_price,
+                              p.unrealised_pnl, p.entry_timestamp,
+                              COALESCE(s.confidence, 0.0) AS open_confidence
+                       FROM positions p
                        JOIN trades  t ON t.id       = p.trade_id
                        JOIN signals s ON s.id       = t.signal_id
                        WHERE p.status                         = 'open'
@@ -840,6 +843,34 @@ class RiskCheck:
                     (symbol, direction, model_source),
                 ).fetchone()
                 if row:
+                    # Log conviction_repeat event — model re-generated the same
+                    # signal while a position is already running. Tracked for
+                    # retrospective analysis: do repeat signals predict better
+                    # trade outcomes on the existing position?
+                    try:
+                        hold_h = (int(time.time()) - row['entry_timestamp']) / 3600
+                        log_event(
+                            MODULE, 'info', 'conviction_repeat',
+                            f'{model_source} repeated {symbol} {direction} '
+                            f'while position {row["trade_id"]} is open '
+                            f'(held {hold_h:.1f}h, unrealised_pnl={row["unrealised_pnl"]})',
+                            {
+                                'model_source':    model_source,
+                                'symbol':          symbol,
+                                'direction':       direction,
+                                'new_signal_id':   signal_id,
+                                'open_trade_id':   row['trade_id'],
+                                'open_position_id': row['id'],
+                                'entry_price':     row['entry_price'],
+                                'current_price':   row['current_price'],
+                                'unrealised_pnl':  row['unrealised_pnl'],
+                                'hold_hours':      round(hold_h, 2),
+                                'open_confidence': row['open_confidence'],
+                            },
+                        )
+                    except Exception as log_exc:
+                        logger.warning('conviction_repeat log failed: %s', log_exc)
+
                     return (
                         f'open_position_exists: {model_source} already has '
                         f'{symbol} {direction} open (paper stacking guard)'
