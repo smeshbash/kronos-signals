@@ -82,7 +82,6 @@ PORTFOLIO_FALLBACK_INR = float(os.environ.get('KRONOS_PORTFOLIO_VALUE_INR', '100
 ASSETS: dict[str, str] = {
     'BTCUSD': 'BTC/USD:USD',
     'ETHUSD': 'ETH/USD:USD',
-    'SOLUSD': 'SOL/USD:USD',
     'BNBUSD': 'BNB/USD:USD',
     'XRPUSD': 'XRP/USD:USD',
 }
@@ -91,7 +90,6 @@ ASSETS: dict[str, str] = {
 _DEFAULT_CONTRACT_SIZES: dict[str, float] = {
     'BTCUSD': 0.001,
     'ETHUSD': 0.01,
-    'SOLUSD': 1.0,
     'BNBUSD': 0.1,
     'XRPUSD': 10.0,
 }

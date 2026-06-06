@@ -70,7 +70,6 @@ RETRY_DELAY_SEC        = 30
 ASSETS: dict[str, str] = {
     'BTCUSD': 'BTC/USD:USD',
     'ETHUSD': 'ETH/USD:USD',
-    'SOLUSD': 'SOL/USD:USD',
     'BNBUSD': 'BNB/USD:USD',
     'XRPUSD': 'XRP/USD:USD',
 }
@@ -79,7 +78,6 @@ DELTA_SYMBOLS = list(ASSETS.keys())
 _DEFAULT_CONTRACT_SIZES: dict[str, float] = {
     'BTCUSD': 0.001,
     'ETHUSD': 0.01,
-    'SOLUSD': 1.0,
     'BNBUSD': 0.1,
     'XRPUSD': 10.0,
 }

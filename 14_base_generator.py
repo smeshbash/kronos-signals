@@ -303,8 +303,8 @@ class BaseGenerator:
             log.exception('signal write failed for %s', symbol)
 
     def _active_symbols(self) -> list[str]:
-        """Fixed 3-asset universe: BTC + ETH + BNB."""
-        return ['BTCUSD', 'ETHUSD', 'BNBUSD']
+        """Fixed 4-asset universe: BTC + ETH + BNB + XRP. Slot 5 reserved for LINK."""
+        return ['BTCUSD', 'ETHUSD', 'BNBUSD', 'XRPUSD']
 
     async def start(self) -> None:
         init_db()

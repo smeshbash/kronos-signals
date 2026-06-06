@@ -67,7 +67,7 @@ CORR_PERIOD_CANDLES = 42     # 7 days x 6 4H candles
 
 FULL_SIZE_PCT    = 10.0      # normal income phase margin per position (Section 10.3)
 REDUCED_SIZE_PCT =  5.0      # second same-dir in 0.70-0.85 band (Section 11.2)
-MAX_POSITIONS    =   3       # income phase max simultaneous open (Section 10.3)
+MAX_POSITIONS    =   5       # 4 active assets + 1 reserved slot for LINKUSD
 
 # All three Slot 3 candidates; Yellow Alert blocks new entries on any of them
 SLOT3_SYMBOL  = 'BNBUSD'   # fixed third asset (BTC=slot1, ETH=slot2)
