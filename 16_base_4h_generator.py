@@ -346,24 +346,8 @@ class Base4HGenerator:
             log.exception('signal write failed for %s', symbol)
 
     def _active_symbols(self) -> list[str]:
-        """Return [BTCUSD, ETHUSD, slot3_symbol]."""
-        symbols = [SLOT1_SYMBOL, SLOT2_SYMBOL]
-        try:
-            with get_connection() as conn:
-                row = conn.execute(
-                    """SELECT data FROM events
-                       WHERE event_type='slot3_selection'
-                         AND data IS NOT NULL
-                       ORDER BY timestamp DESC LIMIT 1""",
-                ).fetchone()
-            if row and row['data']:
-                payload = json.loads(row['data'])
-                slot3   = payload.get('slot3_symbol') or payload.get('symbol')
-                if slot3 and slot3 not in symbols:
-                    symbols.append(slot3)
-        except Exception as exc:
-            log.warning('Could not read slot3_selection: %s', exc)
-        return symbols
+        """Fixed 3-asset universe: BTC + ETH + BNB."""
+        return ['BTCUSD', 'ETHUSD', 'BNBUSD']
 
     # ── Scheduler ─────────────────────────────────────────────────────────────
 

@@ -70,7 +70,7 @@ REDUCED_SIZE_PCT =  5.0      # second same-dir in 0.70-0.85 band (Section 11.2)
 MAX_POSITIONS    =   3       # income phase max simultaneous open (Section 10.3)
 
 # All three Slot 3 candidates; Yellow Alert blocks new entries on any of them
-SLOT3_SYMBOLS = frozenset({'SOLUSD', 'BNBUSD', 'XRPUSD'})
+SLOT3_SYMBOL  = 'BNBUSD'   # fixed third asset (BTC=slot1, ETH=slot2)
 
 # Funding settlement blackout (Section 8.4 / 10.1)
 FUNDING_SETTLEMENT_HOURS = (0, 8, 16)    # UTC hours of 8H settlements
