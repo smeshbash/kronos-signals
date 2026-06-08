@@ -1,0 +1,68 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Kronos Trading System — Linux environment file
+# Copy to /app/kronos/.env on the Linux machine.
+# Fill in the SECRET sections — everything else has safe defaults.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Exchange API (Delta Exchange India) ──────────────────────────────────────
+KRONOS_API_KEY=
+KRONOS_API_SECRET=
+
+# ── Mode & Phase ──────────────────────────────────────────────────────────────
+KRONOS_PAPER_MODE=true
+KRONOS_PHASE=pre_live
+
+# ── Database ──────────────────────────────────────────────────────────────────
+KRONOS_DB_PATH=/app/kronos/data/kronos.db
+
+# ── Capital & Currency ────────────────────────────────────────────────────────
+KRONOS_STARTING_CAPITAL_INR=100000.0
+KRONOS_PORTFOLIO_VALUE_INR=100000.0
+KRONOS_USD_INR_RATE=84.0
+KRONOS_MONTHLY_FIXED_COSTS_INR=915.0
+KRONOS_BASE_INCOME_INR=0
+
+# ── Execution ─────────────────────────────────────────────────────────────────
+KRONOS_LEVERAGE=2.0
+KRONOS_CB_SPREAD_PCT=1.0
+KRONOS_FUNDING_EXIT_ENABLED=false
+KRONOS_REGIME_FILTER=false
+
+# ── Model inference ───────────────────────────────────────────────────────────
+# Set to cuda if the machine has a GPU, otherwise leave as cpu
+KRONOS_SHADOW_DEVICE=cpu
+KRONOS_SHADOW_SAMPLE_COUNT=50
+KRONOS_MINI_CONTEXT=2048
+KRONOS_MINI_4H_CONTEXT=2048
+KRONOS_BASE_CONTEXT=512
+KRONOS_BASE_4H_CONTEXT=512
+KRONOS_SEQ_LEN=96
+KRONOS_PRED_LEN=6
+KRONOS_MAX_PRED_RETURN=20.0
+
+# ── Dashboard ─────────────────────────────────────────────────────────────────
+KRONOS_DASHBOARD_PORT=8050
+# Set these to protect the dashboard with a login prompt
+KRONOS_DASHBOARD_USER=
+KRONOS_DASHBOARD_PASS=
+
+# ── Telegram notifications ────────────────────────────────────────────────────
+KRONOS_TELEGRAM_BOT_TOKEN=
+KRONOS_TELEGRAM_CHAT_ID=
+
+# ── Email notifications (optional) ───────────────────────────────────────────
+KRONOS_EMAIL_FROM=
+KRONOS_EMAIL_TO=
+KRONOS_EMAIL_APP_PASSWORD=
+
+# ── Health monitor thresholds (defaults are fine) ────────────────────────────
+KRONOS_HM_HEARTBEAT_STALE_S=1800
+KRONOS_HM_NOTIFIER_STALE_S=1800
+KRONOS_HM_SLIPPAGE_STALE_S=1800
+KRONOS_HM_PORTFOLIO_STALE_S=18000
+KRONOS_HM_ORPHAN_STALE_S=18000
+KRONOS_HM_FO_MAX=3
+KRONOS_HM_FO_WINDOW_S=86400
+
+# ── Supervisor ────────────────────────────────────────────────────────────────
+KRONOS_SUPERVISORD_PREFIX=kronos-
