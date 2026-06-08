@@ -101,7 +101,7 @@ _DEFAULT_CONTRACT_SIZES: dict[str, float] = {
     'ETHUSD': 0.01,
     'SOLUSD': 1.0,
     'BNBUSD': 0.1,
-    'XRPUSD': 10.0,
+    'XRPUSD': 1.0,    # 1 XRP per contract — corrected 2026-06-07 (was 10.0, inflated fees 10×)
 }
 
 REPORT_DIR = os.path.join(os.path.dirname(__file__), 'data', 'reports')

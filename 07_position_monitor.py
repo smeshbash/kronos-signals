@@ -70,7 +70,6 @@ RETRY_DELAY_SEC        = 30
 ASSETS: dict[str, str] = {
     'BTCUSD': 'BTC/USD:USD',
     'ETHUSD': 'ETH/USD:USD',
-    'SOLUSD': 'SOL/USD:USD',
     'BNBUSD': 'BNB/USD:USD',
     'XRPUSD': 'XRP/USD:USD',
 }
@@ -79,7 +78,6 @@ DELTA_SYMBOLS = list(ASSETS.keys())
 _DEFAULT_CONTRACT_SIZES: dict[str, float] = {
     'BTCUSD': 0.001,
     'ETHUSD': 0.01,
-    'SOLUSD': 1.0,
     'BNBUSD': 0.1,
     'XRPUSD': 10.0,
 }
@@ -267,6 +265,15 @@ class PositionMonitor:
             # M7 maintenance cron reconciles fills from the exchange.
             if pos.get('sl_order_id') and pos.get('tp_order_id'):
                 continue
+
+            # Track running high/low on every tick (in-memory only — no DB write).
+            # The maintenance cron persists these to the positions table every 15 min.
+            # _exit_position reads them from pos at close, so this must happen BEFORE
+            # the exit check — otherwise trades that close before the first cron cycle
+            # (tight 1H ATR targets) write peak_price=trough_price=entry_price.
+            entry_price = pos['entry_price']
+            pos['running_high'] = max(pos.get('running_high') or entry_price, mark_price)
+            pos['running_low']  = min(pos.get('running_low')  or entry_price, mark_price)
 
             exit_reason = None
 

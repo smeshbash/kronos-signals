@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 MODULE = 'slippage_model'
 
-DELTA_SYMBOLS = ['BTCUSD', 'ETHUSD', 'SOLUSD', 'BNBUSD', 'XRPUSD']
+DELTA_SYMBOLS = ['BTCUSD', 'ETHUSD', 'BNBUSD', 'XRPUSD']
 
 # Minimum fill_window rows per symbol before model is considered calibrated.
 # 100 windows ≈ 25 hours at 4 windows/hour. Pre-live runs 6 weeks so this

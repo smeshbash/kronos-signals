@@ -34,7 +34,7 @@ import ccxt
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from db import get_connection, init_db, log_event
+from db import get_connection, init_db, log_event, SIGNAL_REGIME_VERSION
 from tax_utils import incremental_tax, effective_reserve_rate, SECTION_87A_LIMIT
 
 log = logging.getLogger(__name__)
@@ -162,20 +162,29 @@ class PortfolioManager:
         """
         with get_connection() as conn:
             row = conn.execute(
-                """SELECT COALESCE(SUM(COALESCE(pnl_net, pnl_gross)), 0.0) AS total
-                   FROM trades
-                   WHERE status='closed' AND quality_flag IS NULL"""
+                """SELECT COALESCE(SUM(COALESCE(t.pnl_net, t.pnl_gross)), 0.0) AS total
+                   FROM trades t
+                   JOIN signals s ON t.signal_id = s.id
+                   WHERE t.status='closed' AND t.quality_flag IS NULL
+                     AND s.regime_version = ?""",
+                (SIGNAL_REGIME_VERSION,),
             ).fetchone()
             # Use pnl_net (after TDS + fees + funding_paid) when M9 has processed
             # the trade; fall back to pnl_gross for trades closed in the last minute
             # that M9 has not yet processed (pnl_net IS NULL).
+            # Only regime-current trades count — v5 capital starts clean at ₹1L × models.
             closed_pnl: float = float(row['total']) if row else 0.0
 
             row2 = conn.execute(
-                """SELECT COALESCE(SUM(unrealised_pnl), 0.0) AS upnl,
-                          COALESCE(SUM(margin_used),    0.0) AS margin,
+                """SELECT COALESCE(SUM(p.unrealised_pnl), 0.0) AS upnl,
+                          COALESCE(SUM(p.margin_used),    0.0) AS margin,
                           COUNT(*) AS cnt
-                   FROM positions WHERE status='open'"""
+                   FROM positions p
+                   JOIN trades t  ON p.trade_id  = t.id
+                   JOIN signals s ON t.signal_id = s.id
+                   WHERE p.status = 'open'
+                     AND s.regime_version = ?""",
+                (SIGNAL_REGIME_VERSION,),
             ).fetchone()
             unrealised_pnl: float = float(row2['upnl'])   if row2 else 0.0
             active_margin:  float = float(row2['margin'])  if row2 else 0.0
@@ -203,11 +212,13 @@ class PortfolioManager:
                    JOIN signals s ON t.signal_id = s.id
                    WHERE t.status        = 'closed'
                      AND t.quality_flag IS NULL
-                     AND s.model_source  = ?""",
-                (model_source,),
+                     AND s.model_source  = ?
+                     AND s.regime_version = ?""",
+                (model_source, SIGNAL_REGIME_VERSION),
             ).fetchone()
             # pnl_net preferred (TDS + fees + funding_paid already deducted by M9);
             # falls back to pnl_gross for trades M9 has not yet processed.
+            # Only regime-current trades count — clean v5 baseline per model.
             closed_pnl: float = float(row['total']) if row else 0.0
 
             row2 = conn.execute(
@@ -218,8 +229,9 @@ class PortfolioManager:
                    JOIN trades t  ON p.trade_id  = t.id
                    JOIN signals s ON t.signal_id = s.id
                    WHERE p.status       = 'open'
-                     AND s.model_source = ?""",
-                (model_source,),
+                     AND s.model_source = ?
+                     AND s.regime_version = ?""",
+                (model_source, SIGNAL_REGIME_VERSION),
             ).fetchone()
             unrealised_pnl: float = float(row2['upnl'])  if row2 else 0.0
             active_margin:  float = float(row2['margin']) if row2 else 0.0
@@ -247,13 +259,16 @@ class PortfolioManager:
                 if model_source is None:
                     row = conn.execute(
                         'SELECT COALESCE(MAX(peak_value), 0) AS peak'
-                        ' FROM portfolio_snapshots WHERE model_source IS NULL'
+                        ' FROM portfolio_snapshots'
+                        ' WHERE model_source IS NULL AND regime_version = ?',
+                        (SIGNAL_REGIME_VERSION,),
                     ).fetchone()
                 else:
                     row = conn.execute(
                         'SELECT COALESCE(MAX(peak_value), 0) AS peak'
-                        ' FROM portfolio_snapshots WHERE model_source = ?',
-                        (model_source,),
+                        ' FROM portfolio_snapshots'
+                        ' WHERE model_source = ? AND regime_version = ?',
+                        (model_source, SIGNAL_REGIME_VERSION),
                     ).fetchone()
             peak = float(row['peak']) if row and row['peak'] else 0.0
             # Stale-snapshot guard for aggregate: pre-per-model rows had ≈₹1L peak
@@ -646,13 +661,13 @@ class PortfolioManager:
                 """INSERT INTO portfolio_snapshots
                    (timestamp, total_value, active_margin, available_margin,
                     unrealised_pnl, drawdown_pct, peak_value, open_positions,
-                    phase, model_source)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    phase, model_source, regime_version)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (now,
                  round(total_value, 2), round(active_margin, 2),
                  round(available_margin, 2), round(unrealised_pnl, 2),
                  round(drawdown_pct, 4), round(peak_value, 2),
-                 open_positions, PHASE, model_source)
+                 open_positions, PHASE, model_source, SIGNAL_REGIME_VERSION)
             )
         tag = model_source or 'aggregate'
         log.info('Portfolio snapshot [%s]: value=₹%.2f peak=₹%.2f dd=%.2f%% positions=%d',
@@ -667,7 +682,9 @@ class PortfolioManager:
         with get_connection() as conn:
             row = conn.execute(
                 'SELECT total_value FROM portfolio_snapshots'
-                ' WHERE model_source IS NULL ORDER BY id DESC LIMIT 1'
+                ' WHERE model_source IS NULL AND regime_version = ?'
+                ' ORDER BY id DESC LIMIT 1',
+                (SIGNAL_REGIME_VERSION,),
             ).fetchone()
         return float(row['total_value']) if row and row['total_value'] else 0.0
 

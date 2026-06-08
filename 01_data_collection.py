@@ -36,11 +36,10 @@ DELTA_WS_URL    = 'wss://socket.india.delta.exchange'
 DELTA_REST_BASE = 'https://api.india.delta.exchange'
 MODULE          = 'data_collection'
 
-# All 5 income-phase assets (Section 5.1).
+# 4 active assets — slot 5 reserved for LINKUSD (add when ready).
 ASSETS: Dict[str, Dict[str, str]] = {
     'BTC': {'delta': 'BTCUSD', 'ccxt': 'BTC/USD:USD'},
     'ETH': {'delta': 'ETHUSD', 'ccxt': 'ETH/USD:USD'},
-    'SOL': {'delta': 'SOLUSD', 'ccxt': 'SOL/USD:USD'},
     'BNB': {'delta': 'BNBUSD', 'ccxt': 'BNB/USD:USD'},
     'XRP': {'delta': 'XRPUSD', 'ccxt': 'XRP/USD:USD'},
 }
