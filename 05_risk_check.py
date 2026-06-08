@@ -42,6 +42,7 @@ import json
 import logging
 import math
 import os
+import re
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -136,6 +137,19 @@ MIN_PREDICTED_RETURN_PCT = ROUND_TRIP_FEES_PCT   # 0.17% — pure cost-recovery 
 # Fix: no confidence floor. Cost gate (MIN_PREDICTED_RETURN_PCT=0.17%) is the only filter.
 MIN_CONFIDENCE_BY_SOURCE: dict = {}
 
+# Models that are completely disabled for execution. Signals from these sources are
+# rejected immediately before any other check. The signal generator continues running
+# so historical signal data accumulates for future analysis — only execution is blocked.
+#
+# kronos-base (M14) disabled 2026-06-06, re-enabled 2026-06-07:
+#   Disabled reason: 41% directional accuracy, 0 TP hits, 69% horizon exits on 2.0×4H ATR target.
+#   Root cause was exit structure mismatch, not directional signal quality — 2.0×4H ATR TP
+#   (~4.5% move) is structurally unreachable at a 6H hold horizon (1.5×4H candles).
+#   Fix: switched to 1H ATR, TP=1.0×, SL=1.5× (same as M13 kronos-mini — identical horizon).
+#   1H ATR target (~0.65-1.3%) is dimensionally appropriate for 6H. Regime filter handles
+#   directional bias (blocks longs in BEAR, blocks shorts in BULL).
+DISABLED_MODEL_SOURCES: frozenset = frozenset()
+
 # A pending signal older than this is expired, not rejected (Section 10.1: 4H entry timeout)
 SIGNAL_EXPIRY_SECONDS = 4 * 3600
 
@@ -165,7 +179,12 @@ MIN_WINRATE_TRADES_7D    = 1      # need at least 1 closed trade (no spec-define
 # for retrospective validation (actual_return_pct will populate as trades resolve).
 #
 # Disable without code change: set KRONOS_REGIME_FILTER=false in .env
-REGIME_FILTER_ENABLED = os.environ.get('KRONOS_REGIME_FILTER', 'true').lower() == 'true'
+# Disabled 2026-06-07: retrospective analysis on 78 blocked longs showed the filter
+# was INVERTING signal quality — blocked longs averaged +0.146% (35.9% correct) while
+# executed longs averaged -3.526% (12.6% correct).  Root cause: EMA200 on 4H has a
+# ~33-day lag; it fires BEAR after the crash ends and blocks the bounce, while letting
+# all crash longs through as NEUTRAL.  Re-enable via KRONOS_REGIME_FILTER=true in .env.
+REGIME_FILTER_ENABLED = os.environ.get('KRONOS_REGIME_FILTER', 'false').lower() == 'true'
 REGIME_EMA_FAST       = 50    # 4H candles ≈ 8 days — medium-term momentum
 REGIME_EMA_SLOW       = 200   # 4H candles ≈ 33 days — structural trend
 REGIME_CANDLES_NEEDED = REGIME_EMA_SLOW + 50   # buffer for EMA seed accuracy
@@ -294,6 +313,24 @@ class RiskCheck:
                 signal_id=signal_id, symbol=symbol, direction=direction,
                 confidence=confidence, approved=False,
                 rejection_reason='signal_expired_4h_window',
+                size_cap_pct=None, combined_margin_cap_pct=None,
+                slippage_estimate_bps=None,
+                effective_threshold=effective_threshold, checked_at=now,
+            )
+
+        # ── Disabled model gate (paper + live) ───────────────────────────────
+        if model_source in DISABLED_MODEL_SOURCES:
+            rejection_reason = f'model_disabled: {model_source} is not approved for execution'
+            self._update_signal(signal_id, 'rejected', rejection_reason)
+            log_event(MODULE, 'info', 'risk_check',
+                      f'{symbol} signal {signal_id} rejected — {model_source} disabled',
+                      {'signal_id': signal_id, 'symbol': symbol,
+                       'model_source': model_source, 'status': 'rejected',
+                       'rejection_reason': rejection_reason})
+            return RiskCheckResult(
+                signal_id=signal_id, symbol=symbol, direction=direction,
+                confidence=confidence, approved=False,
+                rejection_reason=rejection_reason,
                 size_cap_pct=None, combined_margin_cap_pct=None,
                 slippage_estimate_bps=None,
                 effective_threshold=effective_threshold, checked_at=now,
@@ -1381,6 +1418,81 @@ class RiskCheck:
                   f'Risk check cycle complete: {approved} approved, '
                   f'{rejected} rejected, {expired} expired',
                   {'approved': approved, 'rejected': rejected, 'expired': expired})
+
+        self._resolve_matured_signals()
+
+    # ── Signal resolution ─────────────────────────────────────────────────────
+
+    def _resolve_matured_signals(self) -> None:
+        """
+        Populate actual_return_pct for every signal that has passed its prediction
+        horizon and has OHLCV data available for resolution.
+
+        actual_return_pct = (close_at_horizon - close_at_signal) / close_at_signal × 100
+
+        Runs at the end of every hourly risk-check cycle — idempotent, skips signals
+        that are already resolved or whose horizon candle isn't in the DB yet.
+        Excludes quality-flagged signals (corrupted / pre-fix data).
+        """
+        now = int(time.time())
+        resolved_count = 0
+
+        try:
+            with get_connection() as conn:
+                pending = conn.execute(
+                    """SELECT id, symbol, signal_timestamp, horizon
+                       FROM signals
+                       WHERE actual_return_pct IS NULL
+                         AND quality_flag      IS NULL
+                         AND status            NOT IN ('pending')"""
+                ).fetchall()
+
+                for sig in pending:
+                    sig_ts  = int(sig['signal_timestamp'])
+                    hz_str  = str(sig['horizon'] or '24h')
+                    m       = re.match(r'(\d+)\s*[Hh]', hz_str)
+                    hz_secs = int(m.group(1)) * 3600 if m else 86400
+
+                    if now < sig_ts + hz_secs:
+                        continue   # horizon hasn't elapsed yet
+
+                    sym = sig['symbol']
+                    close_at = conn.execute(
+                        """SELECT close FROM ohlcv
+                           WHERE symbol=? AND timeframe='4h' AND timestamp<=?
+                           ORDER BY timestamp DESC LIMIT 1""",
+                        (sym, sig_ts),
+                    ).fetchone()
+                    close_after = conn.execute(
+                        """SELECT close FROM ohlcv
+                           WHERE symbol=? AND timeframe='4h' AND timestamp>=?
+                           ORDER BY timestamp ASC LIMIT 1""",
+                        (sym, sig_ts + hz_secs),
+                    ).fetchone()
+
+                    if not close_at or not close_after or float(close_at['close']) <= 0:
+                        continue   # OHLCV candle not yet available
+
+                    actual = round(
+                        (float(close_after['close']) - float(close_at['close']))
+                        / float(close_at['close']) * 100,
+                        4,
+                    )
+                    conn.execute(
+                        "UPDATE signals SET actual_return_pct=? WHERE id=?",
+                        (actual, int(sig['id'])),
+                    )
+                    resolved_count += 1
+
+        except Exception as exc:
+            log_event(MODULE, 'warning', 'signal_resolution_error',
+                      f'Signal resolution failed: {exc}', {'error': str(exc)})
+            return
+
+        if resolved_count:
+            log_event(MODULE, 'info', 'signal_resolution',
+                      f'Resolved actual_return_pct for {resolved_count} matured signal(s)',
+                      {'resolved': resolved_count})
 
 
 # ── Standalone runner ─────────────────────────────────────────────────────────

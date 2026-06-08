@@ -56,19 +56,80 @@ FILL_TIMEOUT_SEC = 4 * 3600          # 4H fill timeout (Section 10.1)
 MAX_HOLD_DAYS    = 5                 # fallback max hold if horizon unparseable (Section 8.1)
 RETRY_DELAY_SEC  = 30                # retry once after 30s on API timeout (Section 10.4)
 
-# ATR-based SL/TP — primary exit levels.
-# SL = 1.5 × ATR: swing-appropriate noise buffer (one full average candle range).
-#      Unchanged — tighter SL increases stop-out frequency faster than it improves WR.
-# TP = 2.0 × ATR: reduced from 3.0× to increase TP hit rate.
-#      3×ATR was hit once in 41 trades (2.4%). Positions typically move 0.5–1.2×ATR
-#      before stalling; 2×ATR is meaningfully more achievable within the 5-day window.
-#      R:R = 2.0 / 1.5 = 1.33×. Break-even WR = 42.9%.
-#      All three models with directional edge (custom 40%, kronos-mini 42.9%,
-#      kronos-base 50%) are above break-even WR at this R:R.
+# ATR-based SL/TP — primary exit levels (defaults for all models).
+# SL = 1.5 × ATR: swing-appropriate noise buffer.
+# TP = 2.0 × ATR: R:R = 1.33×. Break-even WR = 42.9%.
 # Falls back to portfolio-% SL/TP if fewer than ATR_PERIOD+1 candles available.
 ATR_PERIOD         = 14
-ATR_SL_MULTIPLIER  = 1.5
-ATR_TP_MULTIPLIER  = 2.0   # ATR_TP / ATR_SL = 1.33× R:R; break-even WR = 42.9%
+ATR_SL_MULTIPLIER  = 1.5   # default — overridden per model via _MODEL_ATR_CONFIG
+ATR_TP_MULTIPLIER  = 2.0   # default — overridden per model via _MODEL_ATR_CONFIG
+MIN_RR_RATIO_DEFAULT = MIN_RR_RATIO  # alias so per-model overrides are explicit
+
+# Per-model ATR configuration: {model_source: (timeframe, tp_mult, sl_mult, min_rr)}
+#
+# kronos-mini (M13) — 1H ATR, base config TP=1.0×, SL=1.5×:
+#   Uses 1H ATR instead of 4H because horizon=6H (1.5 candles at 4H scale).
+#   4H ATR (~2.3%) is dimensionally wrong for a 6H hold; 1H ATR (~0.8%) fits.
+#   Base config used only when no per-symbol override exists (see _MODEL_SYMBOL_ATR_CONFIG).
+#   min_rr = 0.6 retained on base config for backwards compatibility.
+#
+# kronos-base (M14) — 1H ATR, TP=1.0×, SL=1.5× (halted 2026-06-07):
+#   Same horizon (6H) as M13 — same structural fix applies. Previous 2.0×4H ATR config
+#   required ~4.5% move in 6H: 0 TP hits in 32 trades. 1H ATR (~0.8%) makes TP
+#   reachable within the hold window. R:R = 0.67, same inverted structure as M13.
+#   Directional bias (72% long tendency) is handled by regime filter, not config.
+_MODEL_ATR_CONFIG: dict[str, tuple[str, float, float, float]] = {
+    'kronos-mini':  ('1h', 1.0, 1.5, 0.6),
+    'kronos-base':  ('1h', 1.0, 1.5, 0.6),
+}
+# Default config applied when model_source not in _MODEL_ATR_CONFIG
+_DEFAULT_ATR_CONFIG: tuple[str, float, float, float] = (
+    '4h', ATR_TP_MULTIPLIER, ATR_SL_MULTIPLIER, MIN_RR_RATIO_DEFAULT,
+)
+
+# Per-model-symbol ATR overrides: {(model_source, symbol): (timeframe, tp_mult, sl_mult, min_rr)}
+# Takes precedence over _MODEL_ATR_CONFIG when both model_source and symbol match.
+#
+# kronos-mini per-symbol config — tuned 2026-06-08 from 52/43/40/15 trade MFE/MAE analysis:
+#   BNBUSD: TP=1.25×, SL=0.50×  R:R=2.5:1  BE-WR=28.6%  (closest fix, +Rs 690 simulated)
+#   BTCUSD: TP=2.00×, SL=0.50×  R:R=4.0:1  BE-WR=20.0%  (+Rs 307 simulated on 52 trades)
+#   XRPUSD: TP=2.00×, SL=0.25×  R:R=8.0:1  BE-WR=11.1%  (+Rs 757 sim on 10 post-fix trades; halt LIFTED 2026-06-08)
+#   ETHUSD: HALTED — no profitable TP/SL combo exists in 0.25×–5.0× grid, 0% long WR
+#
+# kronos-base per-symbol config — tuned 2026-06-08 from 20/12/12/5 trade MFE/MAE analysis:
+#   BNBUSD: TP=1.00×, SL=0.25×  R:R=4.0:1  BE-WR=20.0%  (58% WR, genuine edge; +Rs 252 sim)
+#   ETHUSD: TP=1.00×, SL=0.25×  R:R=4.0:1  BE-WR=20.0%  (+Rs 987 sim; 12 trades, monitor)
+#   BTCUSD: HALTED — 5% WR (0% longs), only 3 marginal combos in entire grid
+#   XRPUSD: HALTED — 0% WR, Rs 203/trade in fees, no viable combo
+#
+# kronos-mini-4h per-symbol config — tuned 2026-06-08 from 11/14/14/2 trade MFE/MAE analysis:
+#   ETHUSD: default (TP=2.0×, SL=1.5×) — already profitable +Rs 708 actual / +Rs 2,067 sim
+#   XRPUSD: default (TP=2.0×, SL=1.5×) — only 2 trades, re-evaluate at 10+
+#   BTCUSD: TP=2.00×, SL=0.25×  R:R=8.0:1  BE-WR=11.1%  (+Rs 711 sim; longs 14% WR, watch bias)
+#   BNBUSD: HALTED — no viable combo in grid; all 14 trades long in downtrend, -Rs 5,945
+_MODEL_SYMBOL_ATR_CONFIG: dict[tuple[str, str], tuple[str, float, float, float]] = {
+    # kronos-mini (1H)
+    ('kronos-mini', 'BNBUSD'): ('1h', 1.25, 0.50, 1.0),
+    ('kronos-mini', 'BTCUSD'): ('1h', 2.00, 0.50, 1.0),
+    ('kronos-mini', 'XRPUSD'): ('1h', 2.00, 0.25, 1.0),
+    # kronos-base (1H)
+    ('kronos-base', 'BNBUSD'): ('1h', 1.00, 0.25, 1.0),
+    ('kronos-base', 'ETHUSD'): ('1h', 1.00, 0.25, 1.0),
+    # kronos-mini-4h (4H)
+    ('kronos-mini-4h', 'BTCUSD'): ('4h', 2.00, 0.25, 1.0),
+}
+
+# Symbols halted per model — signals are rejected at execution without being executed.
+# {model_source: frozenset of halted symbols}
+# Reason logged: halted_<SYMBOL>_<model_source>
+_MODEL_HALTED_SYMBOLS: dict[str, frozenset] = {
+    'kronos-mini':    frozenset({'ETHUSD'}),              # halted 2026-06-08: 0% long WR, no viable TP/SL fix
+    'kronos-base':    frozenset({'BTCUSD', 'XRPUSD'}),   # halted 2026-06-08: BTC 5% WR/0% longs; XRP 0% WR (fees normal post-fix, but no directional edge)
+    'kronos-mini-4h': frozenset({'BNBUSD'}),              # halted 2026-06-08: all 14 trades long in downtrend, no viable fix
+    'kronos-base-4h': frozenset({'ETHUSD', 'XRPUSD'}),   # halted 2026-06-08: ETH 20% WR/12L in downtrend; XRP 0% WR no viable combo
+    # kronos-mini XRPUSD: halt LIFTED 2026-06-08 — post-fix re-analysis (10 trades, correct fees)
+    #   shows TP=2.00x SL=0.25x is optimal: +Rs 757 sim, 94/400 profitable combos, 60% WR on shorts
+}
 
 # Hold duration = signal horizon × HORIZON_HOLD_MULTIPLIER.
 # Custom '24h' → 4 × 24H = 4 days. Foundation '6h' → 4 × 6H = 1 day.
@@ -91,7 +152,7 @@ _DEFAULT_CONTRACT_SIZES: dict[str, float] = {
     'BTCUSD': 0.001,
     'ETHUSD': 0.01,
     'BNBUSD': 0.1,
-    'XRPUSD': 10.0,
+    'XRPUSD': 1.0,    # 1 XRP per contract — corrected 2026-06-07 (was 10.0, inflated fees 10×)
 }
 
 
@@ -230,10 +291,25 @@ class Execution:
             Execution._update_signal(signal_id, 'rejected', f'unknown_symbol_{symbol}')
             return False
 
+        # Halt check — per-model symbol blacklist (e.g. ETHUSD halted for kronos-mini)
+        if symbol in _MODEL_HALTED_SYMBOLS.get(model_source, frozenset()):
+            log.warning('Signal %d rejected: %s halted for model %s', signal_id, symbol, model_source)
+            log_event(MODULE, 'warning', 'execution_skipped',
+                      f'Signal {signal_id} ({symbol}) rejected — {symbol} halted for {model_source}',
+                      {'signal_id': signal_id, 'symbol': symbol, 'model_source': model_source})
+            Execution._update_signal(signal_id, 'rejected', f'halted_{symbol}_{model_source}')
+            return False
+
+        # ATR config: per-symbol override takes priority over per-model default
+        atr_tf, tp_mult, sl_mult, min_rr = _MODEL_SYMBOL_ATR_CONFIG.get(
+            (model_source, symbol),
+            _MODEL_ATR_CONFIG.get(model_source, _DEFAULT_ATR_CONFIG),
+        )
+
         risk_data       = self._get_risk_data(signal_id)
         portfolio_value = self._get_portfolio_value(model_source)
         mark_price      = self._get_mark_price(symbol)
-        entry_atr       = self._fetch_entry_atr(symbol)
+        entry_atr       = self._fetch_entry_atr(symbol, timeframe=atr_tf)
 
         if mark_price is None:
             log.error('No mark price for %s, signal %d — rejecting', symbol, signal_id)
@@ -247,7 +323,7 @@ class Execution:
             (margin_inr, notional_inr, size_contracts,
              entry_price, sl_price, tp_price) = self._size_position(
                 symbol, direction, risk_data, portfolio_value, mark_price, entry_atr,
-                model_source,
+                model_source, tp_mult=tp_mult, sl_mult=sl_mult, min_rr=min_rr,
             )
         except ExecutionSkipped as exc:
             log.warning('Signal %d skipped: %s', signal_id, exc)
@@ -267,8 +343,8 @@ class Execution:
         signal_ts      = int(signal.get('signal_timestamp') or now)
         horizon_exit_at = signal_ts + horizon_secs
 
-        log.info('Executing signal %d: %s %s model=%s horizon=%s atr=%s sl=%.4f tp=%.4f',
-                 signal_id, symbol, direction, model_source, horizon,
+        log.info('Executing signal %d: %s %s model=%s horizon=%s atr_tf=%s atr=%s sl=%.4f tp=%.4f',
+                 signal_id, symbol, direction, model_source, horizon, atr_tf,
                  f'{entry_atr:.4f}' if entry_atr else 'N/A', sl_price, tp_price)
 
         if PAPER_MODE:
@@ -297,13 +373,15 @@ class Execution:
         mark_price:      float,
         entry_atr:       Optional[float],
         model_source:    str = 'custom',
+        tp_mult:         float = ATR_TP_MULTIPLIER,
+        sl_mult:         float = ATR_SL_MULTIPLIER,
+        min_rr:          float = MIN_RR_RATIO,
     ) -> tuple[float, float, float, float, float, float]:
         """
         Compute (margin_inr, notional_inr, size_contracts, entry_price, sl_price, tp_price).
 
-        SL/TP are ATR-based when entry_atr is available:
-          sl_dist = ATR_SL_MULTIPLIER × ATR  (1.5 × ATR in USD)
-          tp_dist = ATR_TP_MULTIPLIER  × ATR  (2.0 × ATR in USD → R:R = 1.33×)
+        SL/TP are ATR-based when entry_atr is available. Multipliers and min R:R are
+        per-model via _MODEL_ATR_CONFIG; defaults match the global ATR constants.
         Falls back to portfolio-% distances when ATR is unavailable.
 
         Raises ExecutionSkipped if the position cannot be validly constructed.
@@ -354,12 +432,10 @@ class Execution:
 
         # SL / TP distances — ATR-based (primary) or portfolio-% (fallback)
         if entry_atr is not None and entry_atr > 0:
-            # ATR-based: adapts to current market volatility.
-            # R:R = ATR_TP_MULTIPLIER / ATR_SL_MULTIPLIER = 2.0 / 1.5 = 1.33×.
-            sl_dist = ATR_SL_MULTIPLIER * entry_atr
-            tp_dist = ATR_TP_MULTIPLIER * entry_atr
-            log.debug('ATR-based SL/TP: atr=%.4f sl_dist=%.4f tp_dist=%.4f',
-                      entry_atr, sl_dist, tp_dist)
+            sl_dist = sl_mult * entry_atr
+            tp_dist = tp_mult * entry_atr
+            log.debug('ATR-based SL/TP: atr=%.4f sl_mult=%.2f tp_mult=%.2f sl_dist=%.4f tp_dist=%.4f',
+                      entry_atr, sl_mult, tp_mult, sl_dist, tp_dist)
         else:
             # Portfolio-% fallback — used only when OHLCV data is insufficient.
             denom   = size_contracts * contract_size * USD_INR_RATE  # INR per $1 move
@@ -375,10 +451,10 @@ class Execution:
             sl_price = entry_price + sl_dist
             tp_price = entry_price - tp_dist
 
-        # R:R sanity check (Section 8.1)
+        # R:R sanity check. min_rr is per-model (some models use inverted R:R with high WR).
         rr = tp_dist / sl_dist if sl_dist > 0 else 0.0
-        if rr < MIN_RR_RATIO - 1e-6:
-            raise ExecutionSkipped(f'rr_below_minimum: rr={rr:.6f} min={MIN_RR_RATIO}')
+        if rr < min_rr - 1e-6:
+            raise ExecutionSkipped(f'rr_below_minimum: rr={rr:.6f} min={min_rr}')
 
         if direction == 'long' and sl_price >= entry_price:
             raise ExecutionSkipped('sl_not_below_entry_for_long')
@@ -846,19 +922,19 @@ class Execution:
             log.warning('risk_data unavailable for signal %d: %s', signal_id, exc)
         return {}
 
-    def _fetch_entry_atr(self, symbol: str) -> Optional[float]:
+    def _fetch_entry_atr(self, symbol: str, timeframe: str = '4h') -> Optional[float]:
         """
-        Compute 14-period ATR from the ohlcv table (4H candles) at entry time.
-        Returns ATR in USD price units (same scale as mark_price).
-        Returns None if insufficient candle data is available.
+        Compute 14-period ATR from ohlcv at entry time.
+        timeframe: '4h' for 24H-horizon models (default), '1h' for 6H-horizon models.
+        Returns ATR in USD price units. Returns None if insufficient data.
         """
         try:
             with get_connection() as conn:
                 rows = conn.execute(
                     """SELECT high, low, close FROM ohlcv
-                       WHERE symbol=? AND timeframe='4h'
+                       WHERE symbol=? AND timeframe=?
                        ORDER BY timestamp DESC LIMIT ?""",
-                    (symbol, ATR_PERIOD + 1),
+                    (symbol, timeframe, ATR_PERIOD + 1),
                 ).fetchall()
             if len(rows) < 2:
                 return None

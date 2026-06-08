@@ -29,9 +29,11 @@ if (Test-Path $envFile) {
     Write-Host "WARNING: .env not found at $envFile"
 }
 
-# ── Model status — Regime v4 (2026-06-05) ────────────────────────────────────
-# 4 MODELS ACTIVE — Rs 1L capital each. Regime v4: regime filter live, M4 halted.
-# Benchmark model: kronos-base-4h. v1/v2/v3 data archived for reference only.
+# ── Model status — 2026-06-08 ─────────────────────────────────────────────────
+# 4 MODELS ACTIVE: M13 (kronos-mini 1H) + M14 (kronos-base 1H) + M15 (kronos-mini 4H) + M16 (kronos-base-4h)
+# Per-symbol halts still active in 06_execution.py (_MODEL_HALTED_SYMBOLS) for weak-edge assets.
+# M14 re-enabled 2026-06-08: per-asset TP/SL tuned + BTCUSD/XRPUSD halted in execution layer
+# M15 re-enabled 2026-06-08: per-asset TP/SL tuned + BNBUSD halted in execution layer
 $Modules = @{
     1  = @{ Name = "Data Collection";       Script = "01_data_collection.py";    Enabled = $true  }
     2  = @{ Name = "Slippage Model";         Script = "02_slippage_model.py";     Enabled = $true  }
@@ -46,8 +48,8 @@ $Modules = @{
     11 = @{ Name = "Health Monitor";         Script = "11_health_monitor.py";     Enabled = $true  }
     12 = @{ Name = "Dashboard";              Script = "dashboard.py";             Enabled = $true  }
     13 = @{ Name = "Kronos-mini 1H";         Script = "13_mini_generator.py";     Enabled = $true  }
-    14 = @{ Name = "Kronos-base 1H";         Script = "14_base_generator.py";     Enabled = $true  }
-    15 = @{ Name = "Kronos-mini 4H";           Script = "15_mini_4h_generator.py"; Enabled = $true  }
+    14 = @{ Name = "Kronos-base 1H";           Script = "14_base_generator.py";     Enabled = $true  } # re-enabled 2026-06-08: per-asset TP/SL tuned; BTCUSD+XRPUSD halted in execution
+    15 = @{ Name = "Kronos-mini 4H";           Script = "15_mini_4h_generator.py"; Enabled = $true  } # re-enabled 2026-06-08: per-asset TP/SL tuned; BNBUSD halted in execution
     16 = @{ Name = "Kronos-base 4H";           Script = "16_base_4h_generator.py"; Enabled = $true  }
 }
 
@@ -120,7 +122,7 @@ function Start-KronosModule {
 if ($Module -ne 0) {
     Start-KronosModule $Module
 } else {
-    Write-Host "Kronos - starting all modules (regime v4 - 4 models active, custom halted, Rs 1L each)"
+    Write-Host "Kronos - starting all modules (4 models active: M13 mini-1H + M14 base-1H + M15 mini-4H + M16 base-4H)"
     foreach ($num in ($Modules.Keys | Sort-Object)) {
         Start-KronosModule $num
         Start-Sleep -Milliseconds 400

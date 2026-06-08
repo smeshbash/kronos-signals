@@ -44,8 +44,14 @@ DB_PATH = os.environ.get('KRONOS_DB_PATH', os.path.join(os.path.dirname(__file__
 #         All other models' metrics expressed as deltas vs this benchmark.
 #       - Active models: kronos-mini (M13), kronos-base (M14),
 #                        kronos-mini-4h (M15), kronos-base-4h (M16)
-#       v1/v2/v3 are historical reference. v4 is the current benchmark dataset.
-SIGNAL_REGIME_VERSION = 4
+#       v5 changes (2026-06-08):
+#         - XRP contract size corrected (1.0 XRP/contract, was 10.0 — fees were ~10x inflated pre-fix)
+#         - Per-asset TP/SL tuned for all 4 models via MFE/MAE grid search (0.25x–5.0x, 400 combos)
+#         - Per-symbol halts: ETHUSD(mini), BTCUSD+XRPUSD(base), BNBUSD(mini-4h), ETHUSD+XRPUSD(base-4h)
+#         - M14 (kronos-base 1H) + M15 (kronos-mini-4h) re-enabled with tuned per-asset configs
+#         - kronos-mini XRPUSD halt lifted: post-fix re-analysis (+Rs 757 sim, TP=2.0x SL=0.25x optimal)
+#       v1/v2/v3/v4 are historical reference. v5 is the current benchmark dataset.
+SIGNAL_REGIME_VERSION = 5
 
 # ── Benchmark model ────────────────────────────────────────────────────────────
 # Set 2026-06-05. Purely an evaluation marker — zero impact on signal generation,
@@ -392,6 +398,11 @@ def init_db() -> None:
         # Positive = price went up. Compare sign against direction for hit/miss.
         # NULL until resolved.
         "ALTER TABLE signals ADD COLUMN actual_return_pct REAL DEFAULT NULL",
+        # Regime version stamp on portfolio snapshots — mirrors SIGNAL_REGIME_VERSION.
+        # NULL on snapshots written before v5 (these are the v1–v4 archive).
+        # v5+ snapshots have an explicit integer so dashboard/PM queries can
+        # filter to the current regime for a clean capital baseline.
+        "ALTER TABLE portfolio_snapshots ADD COLUMN regime_version INTEGER DEFAULT NULL",
     ]
     for _sql in _migrations:
         try:
@@ -420,12 +431,14 @@ def init_db() -> None:
                     json.dumps({
                         'version': SIGNAL_REGIME_VERSION,
                         'changes': [
-                            'min_predicted_return_pct=0.02 (raised from 1.17% cost floor)',
-                            'kronos_base_min_confidence=0.4 (blocks 0.0-0.2 band, 39.3% accuracy)',
-                            'trailing_stop_paper_mode=disabled (fixed SL/TP for clean R:R data)',
+                            'xrp_contract_size_fix: 1.0 XRP/contract (was 10.0 — fees ~10x inflated pre 2026-06-07)',
+                            'per_asset_tpsl: TP/SL tuned per model×symbol via MFE/MAE grid search (0.25x–5.0x, 400 combos)',
+                            'per_asset_halts: ETHUSD(mini), BTCUSD+XRPUSD(base), BNBUSD(mini-4h), ETHUSD+XRPUSD(base-4h)',
+                            'M14_M15_reenabled: kronos-base-1h and kronos-mini-4h active with tuned configs',
+                            'kronos_mini_xrp_halt_lifted: post-fix re-analysis confirmed TP=2.0x SL=0.25x optimal',
                         ],
-                        'note': 'Signals with regime_version < 2 use incompatible pipeline rules '
-                                '— exclude from benchmark comparisons.',
+                        'note': 'v1/v2/v3/v4 are historical reference — exclude from benchmark comparisons. '
+                                'v5 is the primary benchmark dataset.',
                     }),
                 ),
             )

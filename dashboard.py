@@ -39,6 +39,11 @@ START = float(os.environ.get('KRONOS_STARTING_CAPITAL_INR', 100000.0))
 PAGE_SIZE     = 25    # trade history rows per page
 SIG_PAGE_SIZE = 50    # signals explorer rows per page
 
+# Minimum |actual_return_pct| for a signal to be counted as "correct".
+# A direction win that doesn't clear round-trip fees (~maker+taker+GST ≈ 0.165%)
+# is economically wrong even if the price moved the right way.
+_HIT_THR = 0.15   # %
+
 # Ordered list of known model sources — drives filter chips, cards, analysis views.
 _MODEL_OPTS = [
     ('custom',         'Custom ⊘', 'b-gold',    '#7a5200'),   # halted 2026-06-05
@@ -203,15 +208,19 @@ def _get_filters() -> dict:
         direction = ''
     try:    days    = int(request.args.get('days',    30))
     except: days    = 30
-    try:    regime  = int(request.args.get('regime',   4))
-    except: regime  = 4
+    try:    regime  = int(request.args.get('regime',   5))
+    except: regime  = 5
     try:    page    = max(0, int(request.args.get('page',    0)))
     except: page    = 0
     try:    sigpage = max(0, int(request.args.get('sigpage', 0)))
     except: sigpage = 0
     tab = request.args.get('tab', '')
+    sig_status = request.args.get('sig_status', '')
+    if sig_status not in ('hit', 'miss', 'pending', 'rej-hit', 'rej-miss', 'executed', 'rejected', 'expired'):
+        sig_status = ''
     return dict(models=models, symbols=symbols, direction=direction,
-                days=days, regime=regime, page=page, sigpage=sigpage, tab=tab)
+                days=days, regime=regime, page=page, sigpage=sigpage, tab=tab,
+                sig_status=sig_status)
 
 
 def _trade_where(f: dict):
@@ -237,7 +246,7 @@ def _trade_where(f: dict):
     if f.get('days', 0) > 0:
         parts.append('t.entry_timestamp >= ?')
         params.append(int(time.time()) - f['days'] * 86400)
-    regime = f.get('regime', 3)
+    regime = f.get('regime', 5)
     if regime and regime > 0:                  # 0 = all regimes (no filter)
         parts.append('COALESCE(s.regime_version, 1) = ?')
         params.append(regime)
@@ -262,10 +271,34 @@ def _signal_where(f: dict):
     if f.get('days', 0) > 0:
         parts.append('signal_timestamp >= ?')
         params.append(int(time.time()) - f['days'] * 86400)
-    regime = f.get('regime', 3)
+    regime = f.get('regime', 5)
     if regime and regime > 0:
         parts.append('COALESCE(regime_version, 1) = ?')
         params.append(regime)
+    # Signal status filter — applied only in signal explorer queries
+    ss = f.get('sig_status', '')
+    thr = _HIT_THR
+    if ss == 'hit':
+        parts.append(f"(status='executed' AND actual_return_pct IS NOT NULL"
+                     f" AND ((direction='long'  AND actual_return_pct > {thr})"
+                     f"   OR (direction='short' AND actual_return_pct < -{thr})))")
+    elif ss == 'miss':
+        parts.append(f"(status='executed' AND actual_return_pct IS NOT NULL"
+                     f" AND NOT ((direction='long'  AND actual_return_pct > {thr})"
+                     f"       OR (direction='short' AND actual_return_pct < -{thr})))")
+    elif ss == 'pending':
+        parts.append("(status='executed' AND actual_return_pct IS NULL)")
+    elif ss == 'rej-hit':
+        parts.append(f"(status='rejected' AND actual_return_pct IS NOT NULL"
+                     f" AND ((direction='long'  AND actual_return_pct > {thr})"
+                     f"   OR (direction='short' AND actual_return_pct < -{thr})))")
+    elif ss == 'rej-miss':
+        parts.append(f"(status='rejected' AND actual_return_pct IS NOT NULL"
+                     f" AND NOT ((direction='long'  AND actual_return_pct > {thr})"
+                     f"       OR (direction='short' AND actual_return_pct < -{thr})))")
+    elif ss in ('executed', 'rejected', 'expired'):
+        parts.append("status = ?")
+        params.append(ss)
     return (' AND ' + ' AND '.join(parts)) if parts else '', params
 
 
@@ -284,9 +317,10 @@ def _pos_where(f: dict):
 
 def _filter_count(f: dict) -> int:
     n = len(f.get('models', [])) + len(f.get('symbols', []))
-    if f.get('direction'):   n += 1
+    if f.get('direction'):        n += 1
     if f.get('days', 30) != 30:  n += 1
-    if f.get('regime', 4)  != 4: n += 1
+    if f.get('regime', 5)  != 5: n += 1
+    if f.get('sig_status'):       n += 1
     return n
 
 
@@ -297,13 +331,15 @@ def _url_with(f: dict, **overrides) -> str:
     if m.get('direction'):
         parts.append(f"direction={m['direction']}")
     parts.append(f"days={m.get('days', 30)}")
-    parts.append(f"regime={m.get('regime', 4)}")
+    parts.append(f"regime={m.get('regime', 5)}")
     if m.get('page', 0):
         parts.append(f"page={m['page']}")
     if m.get('sigpage', 0):
         parts.append(f"sigpage={m['sigpage']}")
     if m.get('tab'):
         parts.append(f"tab={m['tab']}")
+    if m.get('sig_status'):
+        parts.append(f"sig_status={m['sig_status']}")
     return '/?' + '&'.join(parts)
 
 
@@ -318,8 +354,20 @@ def _active_filter_desc(f: dict) -> str:
         parts.append(f"Dir: {f['direction'].capitalize()}")
     if f.get('days', 30) != 30:
         parts.append('All time' if f.get('days') == 0 else f"Last {f['days']}d")
-    if f.get('regime', 4) != 4:
+    if f.get('regime', 5) != 5:
         parts.append('All regimes' if f.get('regime') == 0 else f"Regime v{f['regime']}")
+    if f.get('sig_status'):
+        _ss_labels = {
+            'hit':     'Executed — Correct',
+            'miss':    'Executed — Wrong',
+            'pending': 'Pending',
+            'rej-hit': 'Rejected — Correct',
+            'rej-miss':'Rejected — Wrong',
+            'executed':'Executed (all)',
+            'rejected':'Rejected (all)',
+            'expired': 'Expired',
+        }
+        parts.append('Signals: ' + _ss_labels.get(f['sig_status'], f['sig_status'].capitalize()))
     return ' &nbsp;·&nbsp; '.join(parts)
 
 
@@ -358,8 +406,9 @@ def get_data(f: dict) -> dict:
     model_pf: dict = {}
     for _mk in _MODEL_KEYS:
         row = (_q("SELECT total_value, drawdown_pct FROM portfolio_snapshots"
-                  " WHERE model_source=? ORDER BY timestamp DESC LIMIT 1",
-                  (_mk,)) or [{}])[0]
+                  " WHERE model_source=? AND regime_version=?"
+                  " ORDER BY timestamp DESC LIMIT 1",
+                  (_mk, f.get('regime', 5))) or [{}])[0]
         prow = (_q(f"""SELECT COALESCE(SUM(t.pnl_gross), 0) AS gross,
                               COALESCE(SUM(t.pnl_net),   0) AS net,
                               COUNT(*) AS n,
@@ -382,7 +431,9 @@ def get_data(f: dict) -> dict:
 
     # ── Latest aggregate snapshot ──────────────────────────────────────────────
     pf = (_q("SELECT * FROM portfolio_snapshots"
-             " WHERE model_source IS NULL ORDER BY timestamp DESC LIMIT 1") or [{}])[0]
+             " WHERE model_source IS NULL AND regime_version=?"
+             " ORDER BY timestamp DESC LIMIT 1",
+             (f.get('regime', 5),)) or [{}])[0]
 
     # ── Aggregate metrics (filtered) ───────────────────────────────────────────
     tw, tp = _trade_where(f)
@@ -401,7 +452,9 @@ def get_data(f: dict) -> dict:
 
     flagged_trades = (_q("SELECT COUNT(*) AS c FROM trades"
                          " WHERE quality_flag IS NOT NULL") or [{'c': 0}])[0]['c']
-    dd_row = _q("SELECT MAX(drawdown_pct) AS v FROM portfolio_snapshots WHERE model_source IS NULL")
+    dd_row = _q("SELECT MAX(drawdown_pct) AS v FROM portfolio_snapshots"
+                " WHERE model_source IS NULL AND regime_version=?",
+                (f.get('regime', 5),))
     max_dd = _f(dd_row[0]['v']) if dd_row else 0.0
 
     # ── Open positions (filtered) ─────────────────────────────────────────────
@@ -541,9 +594,10 @@ def get_data(f: dict) -> dict:
         ms  = r['ms'] or 'custom'
         sym = r['symbol']
         direction  = str(r['direction'] or '').lower()
-        actual_dir = 'long' if _f(r['actual_return_pct']) > 0 else 'short'
+        _ar = _f(r['actual_return_pct'])
+        actual_dir = 'long' if _ar > _HIT_THR else ('short' if _ar < -_HIT_THR else None)
         matrix_acc[ms][sym]['t'] += 1
-        if actual_dir == direction:
+        if actual_dir and actual_dir == direction:
             matrix_acc[ms][sym]['c'] += 1
 
     # Sorted list of all symbols seen in matrix data
@@ -587,14 +641,15 @@ def get_data(f: dict) -> dict:
     for r in cal_raw:
         ms   = r['ms'] or 'custom'
         conf = _f(r['confidence'])
-        actual_dir = 'long' if _f(r['actual_return_pct']) > 0 else 'short'
+        _ar  = _f(r['actual_return_pct'])
+        actual_dir = 'long' if _ar > _HIT_THR else ('short' if _ar < -_HIT_THR else None)
         direction  = str(r['direction'] or '').lower()
         if ms not in cal_data:
             cal_data[ms] = [{'c': 0, 't': 0} for _ in _CONF_BANDS]
         for i, (lo, hi) in enumerate(_CONF_BANDS):
             if lo <= conf < hi:
                 cal_data[ms][i]['t'] += 1
-                if actual_dir == direction:
+                if actual_dir and actual_dir == direction:
                     cal_data[ms][i]['c'] += 1
                 break
 
@@ -645,6 +700,46 @@ def get_data(f: dict) -> dict:
     has_next_sig = len(sig_raw) > SIG_PAGE_SIZE
     sigs_list    = sig_raw[:SIG_PAGE_SIZE]
 
+    # 6b. Signal accuracy breakdown (base filters only — sig_status excluded so stats
+    #     are always the full picture even when a chip filter narrows the table view)
+    sw_base, sp_base = _signal_where({**f, 'sig_status': ''})
+    _raw_acc = _q(f"""
+        SELECT status, direction,
+               CASE WHEN actual_return_pct IS NULL THEN 'unresolved'
+                    WHEN (direction='long'  AND actual_return_pct >  {_HIT_THR})
+                      OR (direction='short' AND actual_return_pct < -{_HIT_THR}) THEN 'correct'
+                    ELSE 'wrong'
+               END AS outcome,
+               COUNT(*) AS n
+        FROM signals
+        WHERE quality_flag IS NULL {sw_base}
+        GROUP BY status, direction, outcome
+    """, tuple(sp_base))
+    _sc: dict = defaultdict(int)
+    for _r in _raw_acc:
+        _sc[(str(_r['status']), str(_r['direction'] or ''), str(_r['outcome']))] += int(_r['n'])
+    sig_stats = {
+        # Executed
+        'exec_corr_long':   _sc[('executed', 'long',  'correct')],
+        'exec_corr_short':  _sc[('executed', 'short', 'correct')],
+        'exec_wrong_long':  _sc[('executed', 'long',  'wrong')],
+        'exec_wrong_short': _sc[('executed', 'short', 'wrong')],
+        'exec_pend':        _sc[('executed', 'long',  'unresolved')]
+                          + _sc[('executed', 'short', 'unresolved')],
+        # Rejected
+        'rej_corr_long':    _sc[('rejected', 'long',  'correct')],
+        'rej_corr_short':   _sc[('rejected', 'short', 'correct')],
+        'rej_wrong_long':   _sc[('rejected', 'long',  'wrong')],
+        'rej_wrong_short':  _sc[('rejected', 'short', 'wrong')],
+        'rej_unres':        _sc[('rejected', 'long',  'unresolved')]
+                          + _sc[('rejected', 'short', 'unresolved')],
+        # Expired / pending
+        'expired': sum(_sc[(s, d, o)]
+                       for s in ['expired']
+                       for d in ['long', 'short']
+                       for o in ['correct', 'wrong', 'unresolved']),
+    }
+
     # 7. Events log (last 30)
     events_log = _q("""
         SELECT created_at, event_type, message
@@ -679,6 +774,7 @@ def get_data(f: dict) -> dict:
         sigs_list=sigs_list,
         has_next_sig=has_next_sig,
         has_prev_sig=(f.get('sigpage', 0) > 0),
+        sig_stats=sig_stats,
         events_log=events_log,
         activity=activity,
         ts=int(time.time()),
@@ -841,11 +937,55 @@ tr:hover td{background:#f8f9fb}
 .funnel-pct{font-size:.7rem;color:#6b778c}
 
 /* ── Signals explorer row colours ── */
-.sig-hit {background:#f0fff4!important}
-.sig-hit td{background:#f0fff4!important}
-.sig-miss{background:#fff5f5!important}
-.sig-miss td{background:#fff5f5!important}
-.sig-rej {opacity:.6}
+.sig-hit     {background:#f0fff4!important}
+.sig-hit  td {background:#f0fff4!important}
+.sig-miss    {background:#fff5f5!important}
+.sig-miss td {background:#fff5f5!important}
+.sig-rej     {opacity:.45}
+.sig-pending {background:#f0f4ff!important}
+.sig-pending td{background:#f0f4ff!important}
+
+/* ── Signal accuracy bar ── */
+.sig-acc-bar{display:flex;gap:8px;padding:12px 16px;background:#f7f8fa;
+             border-bottom:1px solid #ebecf0;flex-wrap:wrap}
+.sig-acc-card{display:flex;flex-direction:column;gap:4px;background:#fff;
+              border:1.5px solid #dfe1e6;border-radius:8px;padding:10px 14px;
+              flex:1;min-width:130px;text-decoration:none;color:inherit;
+              transition:box-shadow .12s,border-color .12s;cursor:pointer}
+.sig-acc-card:hover{box-shadow:0 2px 8px rgba(0,0,0,.08);text-decoration:none;color:inherit}
+.sig-acc-card.acc-hit  {border-color:#36b37e}
+.sig-acc-card.acc-miss {border-color:#ff5630}
+.sig-acc-card.acc-rh   {border-color:#00875a;border-style:dashed}
+.sig-acc-card.acc-rm   {border-color:#de350b;border-style:dashed}
+.sig-acc-card.acc-other{border-color:#dfe1e6;cursor:default}
+.acc-head{font-size:.65rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#5e6c84}
+.acc-head.c-hit {color:#006644}
+.acc-head.c-miss{color:#bf2600}
+.acc-pct{font-size:1.35rem;font-weight:800;line-height:1.1}
+.acc-pct.c-hit {color:#006644}
+.acc-pct.c-miss{color:#bf2600}
+.acc-pct.c-neu {color:#42526e}
+.acc-total{font-size:.68rem;color:#97a0af}
+.acc-dir{display:flex;justify-content:space-between;font-size:.7rem;color:#5e6c84;
+         border-top:1px solid #f0f1f3;padding-top:3px;margin-top:2px}
+.acc-dir span:last-child{font-weight:600;color:#172b4d}
+.acc-other-row{font-size:.75rem;color:#42526e;display:flex;justify-content:space-between}
+.acc-other-row span:last-child{font-weight:600}
+
+/* ── Signal explorer status chips ── */
+.sig-chips{display:flex;flex-wrap:wrap;gap:6px;padding:10px 16px 4px;border-bottom:1px solid #f0f1f3}
+.sig-chip{display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:20px;
+          font-size:.72rem;font-weight:600;border:1px solid #dfe1e6;color:#5e6c84;
+          background:#fff;text-decoration:none;cursor:pointer;transition:background .12s}
+.sig-chip:hover{background:#f4f5f7;text-decoration:none;color:#172b4d}
+.sig-chip.sc-all{border-color:#dfe1e6}
+.sig-chip.sc-all.on{background:#172b4d;border-color:#172b4d;color:#fff}
+.sig-chip.sc-hit.on{background:#e3fcef;border-color:#36b37e;color:#006644}
+.sig-chip.sc-miss.on{background:#ffebe6;border-color:#ff5630;color:#bf2600}
+.sig-chip.sc-pending.on{background:#e6edff;border-color:#4c9aff;color:#0052cc}
+.sig-chip.sc-rej-hit.on{background:#e3fcef;border-color:#36b37e;color:#006644;opacity:.7}
+.sig-chip.sc-rej-miss.on{background:#ffebe6;border-color:#ff5630;color:#bf2600;opacity:.7}
+.sig-chip.sc-expired.on{background:#f4f5f7;border-color:#97a0af;color:#42526e}
 
 /* ── Events log ── */
 .ev-error td{color:#bf2600}
@@ -872,6 +1012,10 @@ function showTab(name) {{
     document.getElementById('pane-' + name).classList.add('active');
     document.querySelector('[data-tab="' + name + '"]').classList.add('active');
     localStorage.setItem('kronos-tab', name);
+    // Keep filter-form's hidden tab field in sync so form submissions preserve the
+    // active tab even when the URL was changed by history.replaceState.
+    var fltTab = document.getElementById('flt-tab');
+    if (fltTab) fltTab.value = name;
     try {{
         var u = new URL(window.location.href);
         u.searchParams.set('tab', name);
@@ -998,6 +1142,14 @@ window.onload = function() {{
         document.getElementById('flt-tab').value =
             localStorage.getItem('kronos-tab') || 'summary';
     }});
+
+    // Auto-refresh every 30 s — use JS instead of <meta http-equiv="refresh"> so
+    // that window.location.href is read at fire-time, after any history.replaceState
+    // calls (tab switches).  Meta refresh uses the document's original URL and would
+    // silently drop the user's current tab selection.
+    setTimeout(function() {{
+        window.location.assign(window.location.href);
+    }}, 30000);
 }};
 </script>
 """
@@ -1045,7 +1197,7 @@ def _render_filter_bar(f: dict, all_symbols: list) -> str:
         day_opts += f'<option value="{v}"{sel}>{lbl}</option>'
 
     reg_opts = ''
-    for v, lbl in [('4','Regime v4 (current)'),('3','Regime v3 (archive)'),('2','Regime v2 (archive)'),('1','Regime v1 (archive)'),('0','All regimes')]:
+    for v, lbl in [('5','Regime v5 (current)'),('4','Regime v4 (archive)'),('3','Regime v3 (archive)'),('2','Regime v2 (archive)'),('1','Regime v1 (archive)'),('0','All regimes')]:
         sel = ' selected' if str(f['regime']) == v else ''
         reg_opts += f'<option value="{v}"{sel}>{lbl}</option>'
 
@@ -1240,7 +1392,8 @@ def _render_summary_pane(d: dict, f: dict, notice: str) -> str:
             if actual is not None:
                 actual_f  = float(actual)
                 trade_dir = str(t.get('direction', '')).lower()
-                hit       = (trade_dir == ('long' if actual_f > 0 else 'short'))
+                hit       = ((trade_dir == 'long'  and actual_f >  _HIT_THR) or
+                             (trade_dir == 'short' and actual_f < -_HIT_THR))
                 icon      = '&#10003;' if hit else '&#10007;'
                 cls_      = 'outcome-hit' if hit else 'outcome-miss'
                 outcome   = (f'<span class="tag">{conf_str} conf</span><br>'
@@ -1504,23 +1657,26 @@ def _render_signals_pane(d: dict, f: dict, notice: str) -> str:
 
             # Actual return + hit/miss
             if actual is not None:
-                actual_f   = float(actual)
-                actual_dir = 'long' if actual_f > 0 else 'short'
-                hit        = (direction == actual_dir)
-                icon       = '&#10003;' if hit else '&#10007;'
-                cls_       = 'outcome-hit' if hit else 'outcome-miss'
+                actual_f = float(actual)
+                hit      = ((direction == 'long'  and actual_f >  _HIT_THR) or
+                            (direction == 'short' and actual_f < -_HIT_THR))
+                icon     = '&#10003;' if hit else '&#10007;'
+                cls_     = 'outcome-hit' if hit else 'outcome-miss'
                 actual_str = f'<span class="{cls_}">{_pct(actual_f)} {icon}</span>'
             elif status in ('rejected', 'expired'):
                 actual_str = '<span class="neu">—</span>'
             else:
                 actual_str = '<span class="neu" style="font-size:.7rem">pending</span>'
 
-            # Row CSS class
-            if actual is not None and status not in ('rejected', 'expired'):
+            # Row CSS class — maps to legend colours
+            if status in ('rejected', 'expired'):
+                row_cls = 'sig-rej'                          # dim
+            elif actual is not None:
                 actual_f2 = float(actual)
-                row_cls = 'sig-hit' if (direction == ('long' if actual_f2 > 0 else 'short')) else 'sig-miss'
-            elif status in ('rejected', 'expired'):
-                row_cls = 'sig-rej'
+                row_cls = 'sig-hit' if ((direction == 'long'  and actual_f2 >  _HIT_THR) or
+                                        (direction == 'short' and actual_f2 < -_HIT_THR)) else 'sig-miss'
+            elif status == 'executed':
+                row_cls = 'sig-pending'                      # blue — in-flight, not yet resolved
             else:
                 row_cls = ''
 
@@ -1557,13 +1713,96 @@ def _render_signals_pane(d: dict, f: dict, notice: str) -> str:
                     f'<span class="page-info">Showing {showing}</span>'
                     f'{next_btn}</div>')
 
+        # ── Accuracy breakdown bar ────────────────────────────────────────────
+        ss = d.get('sig_stats', {})
+
+        _ecl  = ss.get('exec_corr_long',  0)
+        _ecs  = ss.get('exec_corr_short', 0)
+        _ewl  = ss.get('exec_wrong_long', 0)
+        _ews  = ss.get('exec_wrong_short',0)
+        _ep   = ss.get('exec_pend',       0)
+        _rcl  = ss.get('rej_corr_long',   0)
+        _rcs  = ss.get('rej_corr_short',  0)
+        _rwl  = ss.get('rej_wrong_long',  0)
+        _rws  = ss.get('rej_wrong_short', 0)
+        _ru   = ss.get('rej_unres',       0)
+        _exp  = ss.get('expired',         0)
+
+        _ec   = _ecl + _ecs           # executed correct (all)
+        _ew   = _ewl + _ews           # executed wrong (all)
+        _et   = _ec  + _ew            # executed resolved total
+        _rc   = _rcl + _rcs           # rejected correct (all)
+        _rw   = _rwl + _rws           # rejected wrong (all)
+        _rt   = _rc  + _rw            # rejected resolved total
+
+        def _pstr(num, den):
+            return f'{num/den*100:.1f}%' if den else '—'
+
+        def _acc_card(href, card_cls, head_cls, head_txt,
+                      pct_cls, pct_str, total_str,
+                      long_n, long_d, short_n, short_d):
+            ld = f'{long_n}&thinsp;/&thinsp;{long_d}'  if long_d  else '—'
+            sd = f'{short_n}&thinsp;/&thinsp;{short_d}' if short_d else '—'
+            return f"""<a href="{href}" class="sig-acc-card {card_cls}">
+  <div class="acc-head {head_cls}">{head_txt}</div>
+  <div class="acc-pct  {pct_cls}">{pct_str}</div>
+  <div class="acc-total">{total_str}</div>
+  <div class="acc-dir"><span>&#9650; Long</span><span>{ld}</span></div>
+  <div class="acc-dir"><span>&#9660; Short</span><span>{sd}</span></div>
+</a>"""
+
+        _h = lambda sv: _url_with({**f, 'tab': 'signals', 'sigpage': 0}, sig_status=sv)
+
+        acc_bar = f"""<div class="sig-acc-bar">
+{_acc_card(_h('hit'),     'acc-hit',  'c-hit',  '&#10003; Executed',
+           'c-hit',  _pstr(_ec, _et), f'{_ec} / {_et} resolved',
+           _ecl, _ecl+_ewl, _ecs, _ecs+_ews)}
+{_acc_card(_h('miss'),    'acc-miss', 'c-miss', '&#10007; Executed',
+           'c-miss', _pstr(_ew, _et), f'{_ew} / {_et} resolved',
+           _ewl, _ecl+_ewl, _ews, _ecs+_ews)}
+{_acc_card(_h('rej-hit'), 'acc-rh',   'c-hit',  '&#10003; Rejected',
+           'c-hit',  _pstr(_rc, _rt), f'{_rc} / {_rt} resolved',
+           _rcl, _rcl+_rwl, _rcs, _rcs+_rws)}
+{_acc_card(_h('rej-miss'),'acc-rm',   'c-miss', '&#10007; Rejected',
+           'c-miss', _pstr(_rw, _rt), f'{_rw} / {_rt} resolved',
+           _rwl, _rcl+_rwl, _rws, _rcs+_rws)}
+<div class="sig-acc-card acc-other">
+  <div class="acc-head">Other</div>
+  <div class="acc-other-row"><span>&#9711; Exec pending</span><span>{_ep}</span></div>
+  <div class="acc-other-row"><span>Rej unresolved</span><span>{_ru}</span></div>
+  <div class="acc-other-row"><span>Expired</span><span>{_exp}</span></div>
+</div>
+</div>"""
+
+        # Status filter chips (link-based, no form submission needed)
+        cur_ss = f.get('sig_status', '')
+        _chip_defs = [
+            ('',        'sc-all',     'All'),
+            ('hit',     'sc-hit',     '&#10003; Executed'),
+            ('miss',    'sc-miss',    '&#10007; Executed'),
+            ('pending', 'sc-pending', '&#9711; Pending'),
+            ('rej-hit', 'sc-rej-hit', '&#10003; Rejected'),
+            ('rej-miss','sc-rej-miss','&#10007; Rejected'),
+            ('expired', 'sc-expired', 'Expired'),
+        ]
+        chip_html = ''
+        for val, cls, label in _chip_defs:
+            on   = ' on' if cur_ss == val else ''
+            href = _url_with({**f, 'tab': 'signals', 'sigpage': 0}, sig_status=val)
+            chip_html += f'<a href="{href}" class="sig-chip {cls}{on}">{label}</a>'
+
         tbl = f"""
 <div class="section">
   <div class="section-hdr">Signal Explorer{sfx} <span class="count">{showing}</span>
-    <span class="tag" style="text-transform:none;font-weight:400;font-size:.67rem">
-      &nbsp;&#9646; green = correct direction &nbsp;&#9646; red = wrong direction &nbsp;&#9646; dim = rejected
+    <span class="tag" style="text-transform:none;font-weight:400;font-size:.67rem;margin-left:8px">
+      <span style="color:#006644">&#9646;</span> correct &nbsp;
+      <span style="color:#bf2600">&#9646;</span> wrong &nbsp;
+      <span style="color:#0052cc">&#9646;</span> pending &nbsp;
+      <span style="color:#97a0af">&#9646;</span> rejected/expired
     </span>
   </div>
+  {acc_bar}
+  <div class="sig-chips">{chip_html}</div>
   <div style="overflow-x:auto"><table>
     <thead><tr>
       <th>Time (UTC)</th><th>Symbol</th><th>Model</th><th>Dir</th><th>Conf</th>
@@ -1762,7 +2001,7 @@ def render(d: dict, f: dict) -> str:
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="refresh" content="30">
+  <meta name="x-refresh" content="30">
   <title>Kronos</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   {CSS}
@@ -1773,7 +2012,7 @@ def render(d: dict, f: dict) -> str:
   <span class="topbar-brand">&#9654;&nbsp; KRONOS</span>
   <span class="topbar-right">
     {mode_pill}
-    <span class="pill pill-regime">Regime v4</span>
+    <span class="pill pill-regime">Regime v5</span>
     <span class="pill pill-phase">{phase_lbl}</span>
     <span>Updated {updated}</span>
     <span style="color:#dfe1e6">|</span>

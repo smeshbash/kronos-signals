@@ -36,8 +36,16 @@ DB_PATH = os.environ.get(
     os.path.join(os.path.dirname(__file__), 'data', 'kronos.db'),
 )
 
-TIMEFRAME        = '4h'
-HORIZON_SECONDS  = 24 * 3600   # 6 × 4H = 24H
+TIMEFRAME               = '4h'
+HORIZON_SECONDS_DEFAULT = 24 * 3600   # fallback when signal.horizon is missing
+
+
+def _parse_horizon_secs(horizon_str) -> int:
+    """Parse '6H', '24H', '6h' etc. to seconds. Falls back to 24H."""
+    if not horizon_str:
+        return HORIZON_SECONDS_DEFAULT
+    m = re.match(r'(\d+)\s*[Hh]', str(horizon_str))
+    return int(m.group(1)) * 3600 if m else HORIZON_SECONDS_DEFAULT
 
 CONFIDENCE_BANDS = [
     (0.0, 0.2),
@@ -118,7 +126,8 @@ def _fetch_signals_by_model(conn, regime_version: int) -> dict[str, list[dict]]:
                COALESCE(regime_version, 1) AS regime_version,
                status,
                rejection_reason,
-               actual_return_pct
+               actual_return_pct,
+               horizon
            FROM signals
            WHERE status     NOT IN ('pending')
              AND quality_flag IS NULL
@@ -157,8 +166,9 @@ def _evaluate(conn, signals: list[dict]) -> dict:
         ts        = int(sig['signal_timestamp'])
         conf      = float(sig['confidence'])   # guard: SQLite may return bytes/blob
 
+        hz_secs     = _parse_horizon_secs(sig.get('horizon'))
         close_at    = _close_before(conn, symbol, ts)
-        close_after = _close_after(conn, symbol, ts + HORIZON_SECONDS)
+        close_after = _close_after(conn, symbol, ts + hz_secs)
 
         if symbol not in sym_data:
             sym_data[symbol] = {'total': 0, 'resolved': 0, 'correct': 0}
@@ -301,11 +311,12 @@ def _write_back_outcomes(conn, signals_by_model: dict[str, list]) -> int:
             if sig.get('actual_return_pct') is not None:
                 continue   # already written — idempotent skip
 
-            symbol = str(sig['symbol'])
-            ts     = int(sig['signal_timestamp'])
+            symbol    = str(sig['symbol'])
+            ts        = int(sig['signal_timestamp'])
+            hz_secs   = _parse_horizon_secs(sig.get('horizon'))
 
             close_at    = _close_before(conn, symbol, ts)
-            close_after = _close_after(conn, symbol, ts + HORIZON_SECONDS)
+            close_after = _close_after(conn, symbol, ts + hz_secs)
 
             if close_at is None or close_after is None or close_at <= 0:
                 continue   # horizon candle not yet available
