@@ -29,11 +29,15 @@ if (Test-Path $envFile) {
     Write-Host "WARNING: .env not found at $envFile"
 }
 
-# ── Model status — 2026-06-08 ─────────────────────────────────────────────────
-# 4 MODELS ACTIVE: M13 (kronos-mini 1H) + M14 (kronos-base 1H) + M15 (kronos-mini 4H) + M16 (kronos-base-4h)
+# ── Model status — 2026-06-09 ─────────────────────────────────────────────────
+# 3 MODELS TRADING: M13 (kronos-mini 1H, filtered) + M15 (kronos-mini 4H) + M16 (kronos-base-4h)
+# M14 (kronos-base 1H): generator runs, execution HALTED in 05_risk_check.py (DISABLED_MODEL_SOURCES).
+#   Reason: 56 signals, both longs (WR=14%) and shorts (WR=35%) negative EV. Insufficient data
+#   to validate any filter. Re-evaluate when 50+ v5 short signals have resolved.
+# M13 (kronos-mini 1H): execution filtered via Option A (2026-06-09):
+#   - All longs suspended (0-20% WR across all 4H states, 83 signals)
+#   - Shorts: 4H bearish+RVOL 0.75-1.50x OR 4H neutral+RVOL<2.0x; 4H bullish=skip
 # Per-symbol halts still active in 06_execution.py (_MODEL_HALTED_SYMBOLS) for weak-edge assets.
-# M14 re-enabled 2026-06-08: per-asset TP/SL tuned + BTCUSD/XRPUSD halted in execution layer
-# M15 re-enabled 2026-06-08: per-asset TP/SL tuned + BNBUSD halted in execution layer
 $Modules = @{
     1  = @{ Name = "Data Collection";       Script = "01_data_collection.py";    Enabled = $true  }
     2  = @{ Name = "Slippage Model";         Script = "02_slippage_model.py";     Enabled = $true  }
