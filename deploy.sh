@@ -29,6 +29,29 @@ fi
 
 info "Starting Kronos deployment on $(hostname) — $(date)"
 
+# ── Detect CUDA and select PyTorch build ─────────────────────────────────────
+TORCH_DEVICE="cpu"
+TORCH_LABEL="CPU"
+TORCH_INDEX="https://download.pytorch.org/whl/cpu"
+
+if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null 2>&1; then
+    CUDA_VER=$(nvidia-smi | grep -oP "CUDA Version: \K[0-9]+\.[0-9]+" || echo "0.0")
+    CUDA_MAJOR=$(echo "$CUDA_VER" | cut -d. -f1)
+    CUDA_MINOR=$(echo "$CUDA_VER" | cut -d. -f2)
+    info "NVIDIA GPU detected — CUDA $CUDA_VER"
+    TORCH_DEVICE="cuda"
+    # Map to nearest supported PyTorch wheel
+    if   (( CUDA_MAJOR > 12 || (CUDA_MAJOR == 12 && CUDA_MINOR >= 4) )); then
+        TORCH_INDEX="https://download.pytorch.org/whl/cu124"; TORCH_LABEL="CUDA 12.4"
+    elif (( CUDA_MAJOR == 12 && CUDA_MINOR >= 1 )); then
+        TORCH_INDEX="https://download.pytorch.org/whl/cu121"; TORCH_LABEL="CUDA 12.1"
+    else
+        TORCH_INDEX="https://download.pytorch.org/whl/cu118"; TORCH_LABEL="CUDA 11.8"
+    fi
+else
+    info "No NVIDIA GPU detected — using CPU PyTorch build"
+fi
+
 # ── 1. System packages ────────────────────────────────────────────────────────
 info "Installing system packages..."
 apt-get update -qq
@@ -92,11 +115,11 @@ if [[ ! -d "$VENV_DIR" ]]; then
 fi
 
 # ── 6. Install Python dependencies (run as root into venv, avoids cache perms) ─
-info "Installing PyTorch (CPU build)..."
+info "Installing PyTorch ($TORCH_LABEL build)..."
 "$VENV_DIR/bin/pip" install --quiet --upgrade pip
 "$VENV_DIR/bin/pip" install --quiet \
     torch torchvision \
-    --index-url https://download.pytorch.org/whl/cpu
+    --index-url "$TORCH_INDEX"
 
 info "Installing Kronos requirements..."
 "$VENV_DIR/bin/pip" install --quiet \
@@ -132,6 +155,10 @@ if [[ ! -f "$APP_DIR/.env" ]]; then
 else
     info ".env already exists — skipping."
 fi
+
+# Patch KRONOS_SHADOW_DEVICE to match detected hardware
+sed -i "s/^KRONOS_SHADOW_DEVICE=.*/KRONOS_SHADOW_DEVICE=$TORCH_DEVICE/" "$APP_DIR/.env"
+info "KRONOS_SHADOW_DEVICE set to: $TORCH_DEVICE"
 
 # ── 9. Copy .env to system EnvironmentFile ────────────────────────────────────
 info "Installing /etc/kronos.env..."
