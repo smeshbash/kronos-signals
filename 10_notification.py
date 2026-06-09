@@ -166,16 +166,115 @@ class NotificationModule:
                 pass
         return {}
 
+    # ── DB context helper ──────────────────────────────────────────────────────
+
+    def _get_trade_context(self, trade_id: int) -> dict:
+        """
+        Look up enriched trade context from DB.
+        Returns: model_source, notional_inr, margin_inr, sl_price, tp_price,
+                 portfolio_value (latest snapshot total).
+        All fields have safe defaults — never raises.
+        """
+        ctx: dict = {
+            'model_source':    'custom',
+            'notional_inr':    0.0,
+            'margin_inr':      0.0,
+            'sl_price':        None,
+            'tp_price':        None,
+            'portfolio_value': 0.0,
+        }
+        try:
+            with get_connection() as conn:
+                # model_source + notional via trades → signals join
+                row = conn.execute(
+                    '''SELECT t.notional_value, COALESCE(s.model_source, 'custom') AS model_source
+                       FROM trades t
+                       LEFT JOIN signals s ON t.signal_id = s.id
+                       WHERE t.id = ?''',
+                    (trade_id,)
+                ).fetchone()
+                if row:
+                    ctx['notional_inr'] = float(row['notional_value'] or 0)
+                    ctx['model_source'] = row['model_source'] or 'custom'
+
+                # SL / TP + margin from open position (may be absent if already closed)
+                pos = conn.execute(
+                    '''SELECT stop_loss_price, take_profit_price, margin_used
+                       FROM positions WHERE trade_id = ?''',
+                    (trade_id,)
+                ).fetchone()
+                if pos:
+                    ctx['sl_price']   = pos['stop_loss_price']
+                    ctx['tp_price']   = pos['take_profit_price']
+                    ctx['margin_inr'] = float(pos['margin_used'] or 0)
+
+                # Latest portfolio snapshot
+                snap = conn.execute(
+                    'SELECT total_value FROM portfolio_snapshots ORDER BY id DESC LIMIT 1'
+                ).fetchone()
+                if snap:
+                    ctx['portfolio_value'] = float(snap['total_value'])
+        except Exception as exc:
+            log.warning('_get_trade_context(%d) failed: %s', trade_id, exc)
+        return ctx
+
+    @staticmethod
+    def _px(v) -> str:
+        """Format a price as $X,XXX.XX — returns '?' if not numeric."""
+        try:
+            return f'${float(v):,.2f}'
+        except (TypeError, ValueError):
+            return str(v) if v is not None else '?'
+
+    @staticmethod
+    def _pct_diff(price, target) -> str:
+        """Return (+X.XX%) string showing target vs price, or ''."""
+        try:
+            diff = (float(target) - float(price)) / float(price) * 100
+            return f'  ({diff:+.2f}%)'
+        except (TypeError, ValueError, ZeroDivisionError):
+            return ''
+
     # ── Message formatters ─────────────────────────────────────────────────────
 
     def _fmt_fill(self, p: dict, event_type: str) -> str:
-        mode    = 'PAPER' if p.get('paper') else 'LIVE'
-        symbol  = p.get('symbol', '?')
+        mode      = 'PAPER' if p.get('paper') else 'LIVE'
+        symbol    = p.get('symbol', '?')
         direction = (p.get('direction') or '').upper()
-        price   = p.get('fill_price') or p.get('entry_price') or p.get('mark_price', 0)
-        size    = p.get('size_contracts', '?')
-        return (f'[{mode}] Trade filled\n'
-                f'{symbol} {direction}  size={size} contracts  price={price}')
+        price     = p.get('fill_price') or p.get('entry_price') or p.get('mark_price', 0)
+        size      = p.get('size_contracts', '?')
+
+        # paper_fill payload is already rich; order_filled is sparse → DB lookup
+        trade_id  = p.get('trade_id')
+        ctx       = self._get_trade_context(int(trade_id)) if trade_id else {}
+
+        model     = ctx.get('model_source', 'custom')
+        notional  = p.get('notional_inr') or ctx.get('notional_inr', 0)
+        margin    = p.get('margin_inr')   or ctx.get('margin_inr', 0)
+        sl_price  = p.get('sl_price')     or ctx.get('sl_price')
+        tp_price  = p.get('tp_price')     or ctx.get('tp_price')
+        portfolio = ctx.get('portfolio_value', 0)
+
+        lines = [
+            f'[{mode}] Trade Filled — {model}',
+            f'{symbol} {direction}',
+            f'─────────────────',
+            f'Entry:    {self._px(price)}',
+            f'Size:     {size} contracts',
+        ]
+        if notional:
+            notional_line = f'Notional: INR {float(notional):,.0f}'
+            if margin:
+                notional_line += f'  (margin INR {float(margin):,.0f})'
+            lines.append(notional_line)
+        if sl_price is not None:
+            lines.append(f'SL:       {self._px(sl_price)}{self._pct_diff(price, sl_price)}')
+        if tp_price is not None:
+            lines.append(f'TP:       {self._px(tp_price)}{self._pct_diff(price, tp_price)}')
+        if portfolio:
+            lines.append(f'─────────────────')
+            lines.append(f'Portfolio: INR {portfolio:,.0f}')
+        return '\n'.join(lines)
 
     def _fmt_timeout(self, p: dict) -> str:
         symbol = p.get('symbol', '?')
@@ -189,23 +288,47 @@ class NotificationModule:
                 f'Trade ID: {p.get("trade_id", "?")}')
 
     def _fmt_exit(self, p: dict, event_type: str) -> str:
-        reason   = event_type.replace('_exit', '').replace('_', ' ').upper()
-        symbol   = p.get('symbol', '?')
+        reason    = event_type.replace('_exit', '').replace('_', ' ').upper()
+        symbol    = p.get('symbol', '?')
         direction = (p.get('direction') or '').upper()
-        pnl      = p.get('pnl_gross', 0)
-        sign     = '+' if pnl >= 0 else ''
-        entry_px = p.get('entry_price', '?')
-        exit_px  = p.get('exit_price', '?')
-        mode     = ' [PAPER]' if p.get('paper') else ''
-        msg      = (f'{reason} exit{mode}\n'
-                    f'{symbol} {direction}  entry={entry_px}  exit={exit_px}\n'
-                    f'P&L: {sign}INR {pnl:.2f}')
+        pnl       = float(p.get('pnl_gross', 0))
+        sign      = '+' if pnl >= 0 else ''
+        entry_px  = p.get('entry_price')
+        exit_px   = p.get('exit_price')
+        mode      = ' [PAPER]' if p.get('paper') else ''
+
+        trade_id  = p.get('trade_id')
+        ctx       = self._get_trade_context(int(trade_id)) if trade_id else {}
+
+        model     = ctx.get('model_source', 'custom')
+        notional  = ctx.get('notional_inr', 0)
+        portfolio = ctx.get('portfolio_value', 0)
+        # SL/TP still available if position not yet deleted (live mode or race window)
+        sl_price  = ctx.get('sl_price')
+        tp_price  = ctx.get('tp_price')
+
+        lines = [
+            f'{reason} EXIT{mode} — {model}',
+            f'{symbol} {direction}',
+            f'─────────────────',
+            f'{self._px(entry_px)}  →  {self._px(exit_px)}',
+            f'P&L: {sign}INR {pnl:.2f}',
+        ]
+        if notional:
+            lines.append(f'Notional: INR {float(notional):,.0f}')
+        if sl_price is not None:
+            lines.append(f'SL was:   {self._px(sl_price)}')
+        if tp_price is not None:
+            lines.append(f'TP was:   {self._px(tp_price)}')
+        if portfolio:
+            lines.append(f'─────────────────')
+            lines.append(f'Portfolio: INR {portfolio:,.0f}')
         if event_type == 'stop_loss_exit':
             blackout = p.get('blackout_until', 0)
             if blackout:
                 dt = datetime.fromtimestamp(blackout, tz=timezone.utc)
-                msg += f'\n4H blackout until {dt.strftime("%H:%M UTC")}'
-        return msg
+                lines.append(f'4H blackout until {dt.strftime("%H:%M UTC")}')
+        return '\n'.join(lines)
 
     def _fmt_alert(self, p: dict, event_type: str) -> str:
         dd     = p.get('drawdown_pct', 0)
