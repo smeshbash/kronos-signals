@@ -1346,11 +1346,11 @@ def _render_summary_pane(d: dict, f: dict, notice: str) -> str:
   <td>{_model(p.get('model_source') or 'custom')}</td>
   <td style="font-size:.82rem"><strong>{sz:,.6f}</strong><br>
     <span class="tag">&#8377;{notl:,.0f}</span></td>
-  <td>&#8377;{ep:,.2f}</td><td>&#8377;{cp:,.2f}</td>
+  <td>${ep:,.2f}</td><td>${cp:,.2f}</td>
   <td class="{_gain(upnl)}">{_inr(upnl)}<br><span class="tag">({_pct(upct)})</span></td>
-  <td class="pos" style="font-size:.8rem">&#8377;{rh:,.2f}<br><span class="tag">{_pct(pk_pct)}</span></td>
-  <td class="neg" style="font-size:.8rem">&#8377;{rl:,.2f}<br><span class="tag">{_pct(tr_pct)}</span></td>
-  <td class="tag" style="font-size:.75rem">SL &#8377;{sl:,.2f}<br>TP &#8377;{tp_:,.2f}</td>
+  <td class="pos" style="font-size:.8rem">${rh:,.2f}<br><span class="tag">{_pct(pk_pct)}</span></td>
+  <td class="neg" style="font-size:.8rem">${rl:,.2f}<br><span class="tag">{_pct(tr_pct)}</span></td>
+  <td class="tag" style="font-size:.75rem">SL ${sl:,.2f}<br>TP ${tp_:,.2f}</td>
   <td class="neu">{_elapsed(p['entry_timestamp'])}</td>
   <td class="tag">{_ts(p['max_hold_until'])}</td>
 </tr>"""
@@ -1383,9 +1383,9 @@ def _render_summary_pane(d: dict, f: dict, notice: str) -> str:
             pk     = t.get('peak_price')
             tr_    = t.get('trough_price')
 
-            pk_cell = (f'&#8377;{_f(pk):,.2f}<br><span class="tag">{_pct((_f(pk)-ep)/ep*100)}</span>'
+            pk_cell = (f'${_f(pk):,.2f}<br><span class="tag">{_pct((_f(pk)-ep)/ep*100)}</span>'
                        if pk and ep else '<span class="neu">--</span>')
-            tr_cell = (f'&#8377;{_f(tr_):,.2f}<br><span class="tag">{_pct((_f(tr_)-ep)/ep*100)}</span>'
+            tr_cell = (f'${_f(tr_):,.2f}<br><span class="tag">{_pct((_f(tr_)-ep)/ep*100)}</span>'
                        if tr_ and ep else '<span class="neu">--</span>')
 
             conf_str = f'{float(conf):.3f}' if conf is not None else '--'
@@ -1410,7 +1410,7 @@ def _render_summary_pane(d: dict, f: dict, notice: str) -> str:
   <td>{_dir(t['direction'])}</td>
   <td>{_model(t.get('model_source') or 'custom')}</td>
   <td style="font-size:.82rem"><strong>{sz:,.6f}</strong></td>
-  <td class="tag">&#8377;{ep:,.2f} &rarr; &#8377;{xp:,.2f}</td>
+  <td class="tag">${ep:,.2f} &rarr; ${xp:,.2f}</td>
   <td class="{_gain(g)}">{_inr(g)}</td>
   <td class="pos" style="font-size:.8rem">{pk_cell}</td>
   <td class="neg" style="font-size:.8rem">{tr_cell}</td>
