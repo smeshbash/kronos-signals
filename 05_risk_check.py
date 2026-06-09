@@ -398,6 +398,25 @@ class RiskCheck:
             if _mini_4h_block:
                 rejection_reason = _mini_4h_block
 
+        # ── kronos-base-4h RVOL + synthetic daily filter (paper + live) ──────
+        # Implemented 2026-06-09 based on backtest of 62 resolved signals.
+        #
+        # LONGS suspended entirely: WR=27.8%, EV=-Rs 357/trade (n=18).
+        #   15/18 longs fired against daily downtrend (structural model bias).
+        #   Zero longs fired with bullish daily alignment. No filter rescues them.
+        #
+        # SHORTS: apply RVOL 0.75x–1.50x gate + skip daily-bullish.
+        #   RVOL < 0.75x:          WR=31.2%, EV=-Rs  20 (n=16) — noise candles, block
+        #   RVOL 0.75x–1.50x:      WR=95.0%, EV=+Rs 380 (n=20) — confirmed volume, execute
+        #   Daily bullish:         WR=38.5%, EV=-Rs  97 (n=13) — counter-trend, block
+        #   Daily bear+neutral + RVOL 0.75-1.50x: n=20, WR=95.0%, EV=+Rs 380
+        #   On current data all RVOL 0.75-1.50x shorts are also non-bullish-daily.
+        #   Daily gate adds defence against future regime shifts.
+        if not rejection_reason:
+            _base_4h_block = RiskCheck._check_kronos_base_4h_filter(model_source, direction, symbol)
+            if _base_4h_block:
+                rejection_reason = _base_4h_block
+
         # ── Paper mode: benchmark fast-path ──────────────────────────────────
         # Goal: maximum throughput across all models for benchmark accuracy.
         #
@@ -844,6 +863,34 @@ class RiskCheck:
             return None
 
     @staticmethod
+    def _get_4h_rvol(symbol: str, period: int = 20) -> Optional[float]:
+        """
+        Compute RVOL = current 4H candle volume / rolling 20-period average volume.
+
+        Returns None if fewer than 2 candles are available so callers can fail open.
+        A return of None means 'insufficient data' — the filter should not block
+        on missing volume data.
+        """
+        try:
+            with get_connection() as conn:
+                rows = conn.execute(
+                    """SELECT volume FROM ohlcv
+                       WHERE symbol=? AND timeframe='4h'
+                       ORDER BY timestamp DESC LIMIT ?""",
+                    (symbol, period + 1),
+                ).fetchall()
+            if len(rows) < 2:
+                return None
+            curr_vol = float(rows[0]['volume'])
+            avg_vol  = sum(float(r['volume']) for r in rows[1:]) / len(rows[1:])
+            if avg_vol <= 0:
+                return None
+            return curr_vol / avg_vol
+        except Exception as exc:
+            logger.warning('_get_4h_rvol failed for %s: %s', symbol, exc)
+            return None
+
+    @staticmethod
     def _check_kronos_mini_filter(
         model_source: str,
         direction:    str,
@@ -1009,6 +1056,70 @@ class RiskCheck:
             )
 
         return None   # neutral or bearish daily — APPROVED
+
+    @staticmethod
+    def _check_kronos_base_4h_filter(
+        model_source: str,
+        direction:    str,
+        symbol:       str,
+    ) -> Optional[str]:
+        """
+        kronos-base-4h direction, volume, and synthetic-daily gate (2026-06-09).
+
+        Applied in both paper and live mode so v5 data accumulates under the
+        same filter conditions used in live trading.
+
+        LONGS — suspended entirely.
+          Reason: 18 historical signals. WR=27.8%, EV=-Rs 357/trade.
+          15/18 longs fired against daily downtrend (structural model bias) —
+          SMA-42 above (7-day downtrend): n=18, all 18 longs. Zero fired with
+          bullish daily alignment or volume confirmation. No filter rescues them.
+          Reinstate when model retrained.
+
+        SHORTS — two-gate filter:
+          (1) RVOL 0.75x–1.50x gate (primary):
+                RVOL < 0.75x:    WR=31.2%, EV=-Rs  20 (n=16) — noise, block
+                RVOL 0.75–1.50x: WR=95.0%, EV=+Rs 380 (n=20) — execute
+                Fail open (None) if RVOL unavailable — never block on missing data.
+          (2) Skip daily-bullish (safety net):
+                Daily bullish:  WR=38.5%, EV=-Rs 97 (n=13) — block
+                Daily neutral:  WR=75.0%, EV=+Rs476        — execute
+                Daily bearish:  WR=91.3%, EV=+Rs237        — execute
+                Note: on current data all RVOL 0.75-1.50x shorts are also
+                non-bullish-daily. Daily gate defends against future regime shifts
+                where a bullish-daily short might land in the volume band.
+        """
+        if model_source != 'kronos-base-4h':
+            return None
+
+        # ── Longs: suspended ─────────────────────────────────────────────────
+        if direction == 'long':
+            return (
+                'kronos_base_4h_longs_suspended: '
+                'WR=27.8% EV=-Rs357/trade on 18 historical signals; '
+                '15/18 longs fired against daily downtrend, zero with bullish alignment. '
+                'Reinstate when model retrained. (2026-06-09)'
+            )
+
+        # ── Shorts: RVOL 0.75x–1.50x gate ───────────────────────────────────
+        rvol = RiskCheck._get_4h_rvol(symbol)
+        if rvol is not None and not (0.75 <= rvol <= 1.50):
+            return (
+                f'kronos_base_4h_short_rvol_gate: '
+                f'RVOL={rvol:.2f}x outside 0.75–1.50x band. '
+                f'<0.75x=noise candle (WR=31%), >1.50x=extended move. (2026-06-09)'
+            )
+
+        # ── Shorts: skip when synthetic daily is bullish ──────────────────────
+        daily_state = RiskCheck._get_synthetic_daily_state(symbol)
+        if daily_state == 'bullish':
+            return (
+                f'kronos_base_4h_short_daily_bullish_blocked: '
+                f'{symbol} synthetic daily (last 24H) is bullish — '
+                f'counter-trend short. Backtest WR=38.5% EV=-Rs97 (n=13). (2026-06-09)'
+            )
+
+        return None   # APPROVED: RVOL in band (or no data) + non-bullish daily
 
     @staticmethod
     def _check_regime_direction_block(symbol: str, direction: str) -> Optional[str]:

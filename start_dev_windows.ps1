@@ -37,6 +37,14 @@ if (Test-Path $envFile) {
 # M13 (kronos-mini 1H): execution filtered via Option A (2026-06-09):
 #   - All longs suspended (0-20% WR across all 4H states, 83 signals)
 #   - Shorts: 4H bearish+RVOL 0.75-1.50x OR 4H neutral+RVOL<2.0x; 4H bullish=skip
+# M15 (kronos-mini 4H): execution filtered (2026-06-09):
+#   - All longs suspended (WR=21.4%, EV=-Rs376/trade, 28 signals)
+#   - Shorts: skip when synthetic daily (last 6×4H) is bullish (WR=0%, n=3)
+#   - RVOL gate omitted (n=17 too thin); re-evaluate after 40+ v5 shorts resolve
+# M16 (kronos-base 4H): execution filtered (2026-06-09):
+#   - All longs suspended (WR=27.8%, EV=-Rs357/trade, 18 signals)
+#   - Shorts: require RVOL 0.75x-1.50x (WR=95% in band vs WR=31% below band)
+#             AND skip when synthetic daily (last 6×4H) is bullish (WR=38.5%, n=13)
 # Per-symbol halts still active in 06_execution.py (_MODEL_HALTED_SYMBOLS) for weak-edge assets.
 $Modules = @{
     1  = @{ Name = "Data Collection";       Script = "01_data_collection.py";    Enabled = $true  }
