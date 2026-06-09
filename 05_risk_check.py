@@ -380,6 +380,24 @@ class RiskCheck:
             if _mini_block:
                 rejection_reason = _mini_block
 
+        # ── kronos-mini-4h synthetic daily filter (paper + live) ─────────────
+        # Implemented 2026-06-09 based on backtest of 45 resolved signals.
+        #
+        # LONGS suspended entirely: WR=21.4%, EV=-Rs 376/trade (n=28).
+        #   No filter rescues them. BNBUSD (already execution-halted) was 57%.
+        #
+        # SHORTS: skip when synthetic daily candle (last 6 × 4H = 24H) is bullish.
+        #   Daily bullish:  n=3,  WR=0%,   EV=-Rs 333  — all 3 lost, skip
+        #   Daily neutral:  n=4,  WR=100%, EV=+Rs 518  — execute
+        #   Daily bearish:  n=10, WR=80%,  EV=+Rs 344  — execute
+        #   Removing 3 bullish-daily shorts improves total PnL +Rs 4,518→+Rs 5,519.
+        #   RVOL filter NOT applied: n=17 too thin, one high-RVOL short was +Rs 1,171.
+        #   Re-evaluate RVOL gate after 40+ v5 short signals resolve.
+        if not rejection_reason:
+            _mini_4h_block = RiskCheck._check_kronos_mini_4h_filter(model_source, direction, symbol)
+            if _mini_4h_block:
+                rejection_reason = _mini_4h_block
+
         # ── Paper mode: benchmark fast-path ──────────────────────────────────
         # Goal: maximum throughput across all models for benchmark accuracy.
         #
@@ -896,6 +914,101 @@ class RiskCheck:
             return None   # APPROVED: neutral 4H + volume below panic threshold
 
         return None   # unknown state — fail open
+
+    @staticmethod
+    def _get_synthetic_daily_state(symbol: str) -> str:
+        """
+        Classify the synthetic daily candle for symbol by grouping the last
+        6 × 4H bars (= 24 hours) into a single OHLC candle.
+
+        Synthetic daily OHLC:
+          open  = open  of the oldest of the 6 bars
+          close = close of the newest of the 6 bars
+          high  = max(high)  across all 6 bars
+          low   = min(low)   across all 6 bars
+
+        Returns 'bearish', 'neutral', or 'bullish'.
+        Neutral = body (|close - open|) < 30% of total range (high - low).
+
+        Fails open ('neutral') on any DB error or insufficient data so a data
+        gap never silently blocks all short signals.
+        """
+        NEUTRAL_BODY_RATIO = 0.30
+        try:
+            with get_connection() as conn:
+                rows = conn.execute(
+                    """SELECT open, high, low, close FROM ohlcv
+                       WHERE symbol=? AND timeframe='4h'
+                       ORDER BY timestamp DESC LIMIT 6""",
+                    (symbol,),
+                ).fetchall()
+            if len(rows) < 6:
+                return 'neutral'   # insufficient history — fail open
+            syn_open  = float(rows[-1]['open'])   # oldest bar's open
+            syn_close = float(rows[0]['close'])   # newest bar's close
+            syn_high  = max(float(r['high']) for r in rows)
+            syn_low   = min(float(r['low'])  for r in rows)
+            rng = syn_high - syn_low
+            if rng <= 0:
+                return 'neutral'
+            body_ratio = abs(syn_close - syn_open) / rng
+            if body_ratio < NEUTRAL_BODY_RATIO:
+                return 'neutral'
+            return 'bullish' if syn_close > syn_open else 'bearish'
+        except Exception as exc:
+            logger.warning('_get_synthetic_daily_state failed for %s: %s — failing open',
+                           symbol, exc)
+            return 'neutral'
+
+    @staticmethod
+    def _check_kronos_mini_4h_filter(
+        model_source: str,
+        direction:    str,
+        symbol:       str,
+    ) -> Optional[str]:
+        """
+        kronos-mini-4h direction and synthetic-daily gate (2026-06-09).
+
+        Applied in both paper and live mode.
+
+        LONGS — suspended entirely.
+          Reason: 28 historical signals. WR=21.4%, EV=-Rs 376/trade.
+          No volume or HTF filter produces positive EV. BNBUSD (57% of longs)
+          already execution-halted. Reinstate when model retrained.
+
+        SHORTS — skip when synthetic daily candle (last 6 × 4H = 24H) is bullish.
+          Daily bullish:  n=3,  WR=0%,   EV=-Rs 333  → blocked
+          Daily neutral:  n=4,  WR=100%, EV=+Rs 518  → approved
+          Daily bearish:  n=10, WR=80%,  EV=+Rs 344  → approved
+          Removing the 3 bullish-daily shorts lifts total short PnL
+          from +Rs 4,518 to +Rs 5,519 over the same historical period.
+
+        RVOL gate deliberately omitted: n=17 total shorts is too thin to validate
+        a volume filter (one high-RVOL short was +Rs 1,171 — would be cut).
+        Re-evaluate after 40+ v5 short signals resolve.
+        """
+        if model_source != 'kronos-mini-4h':
+            return None
+
+        # ── Longs: suspended ─────────────────────────────────────────────────
+        if direction == 'long':
+            return (
+                'kronos_mini_4h_longs_suspended: '
+                'WR=21.4% EV=-Rs376/trade on 28 historical signals; '
+                'no filter rescues them. Reinstate when model retrained. (2026-06-09)'
+            )
+
+        # ── Shorts: skip when synthetic daily is bullish ──────────────────────
+        daily_state = RiskCheck._get_synthetic_daily_state(symbol)
+
+        if daily_state == 'bullish':
+            return (
+                f'kronos_mini_4h_short_daily_bullish_blocked: '
+                f'{symbol} synthetic daily (last 24H) is bullish — '
+                f'counter-trend short. Backtest WR=0% EV=-Rs333 (n=3). (2026-06-09)'
+            )
+
+        return None   # neutral or bearish daily — APPROVED
 
     @staticmethod
     def _check_regime_direction_block(symbol: str, direction: str) -> Optional[str]:
