@@ -53,6 +53,8 @@ if [[ -d "$APP_DIR/.git" ]]; then
     sudo -u "$KRONOS_USER" git -C "$APP_DIR" pull --ff-only
 else
     info "Cloning Kronos signals repo..."
+    # Dir may exist (created by useradd as home dir) but not be a git repo — wipe and reclone
+    rm -rf "$APP_DIR"
     git clone "$REPO_URL" "$APP_DIR"
     chown -R "$KRONOS_USER:$KRONOS_USER" "$APP_DIR"
 fi
