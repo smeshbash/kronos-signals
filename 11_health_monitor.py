@@ -562,8 +562,21 @@ class HealthMonitor:
         Attempt restart of module_name via supervisorctl.
         Only called for modules in _AUTO_RESTART_PROCESSES.
         Returns True on success (exit code 0).
+
+        No-op on Windows: supervisord/supervisorctl is a Linux process manager
+        and is not available on Windows. On Windows, Kronos modules are launched
+        as separate PowerShell windows by start_dev_windows.ps1 — manual restart
+        is required. A warning is logged so the staleness is still visible.
         """
+        import sys
         if module_name not in _AUTO_RESTART_PROCESSES:
+            return False
+        if sys.platform == 'win32':
+            log.warning(
+                'supervisord not available on Windows — cannot auto-restart %s. '
+                'Restart manually via start_dev_windows.ps1 -Module <N>.',
+                module_name,
+            )
             return False
         process = f'{SUPERVISORD_PREFIX}{_AUTO_RESTART_PROCESSES[module_name]}'
         try:
