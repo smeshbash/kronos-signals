@@ -74,30 +74,42 @@ for SUBDIR in vendor/kronos Kronos; do
 done
 
 # ── 5. Python virtual environment ────────────────────────────────────────────
+# Always recreate if it exists but isn't owned by kronos (leftover root-owned venv)
+if [[ -d "$VENV_DIR" ]]; then
+    VENV_OWNER=$(stat -c '%U' "$VENV_DIR")
+    if [[ "$VENV_OWNER" != "$KRONOS_USER" ]]; then
+        warn "Venv exists but owned by '$VENV_OWNER' — recreating..."
+        rm -rf "$VENV_DIR"
+    else
+        info "Virtualenv already exists and owned by $KRONOS_USER."
+    fi
+fi
+
 if [[ ! -d "$VENV_DIR" ]]; then
     info "Creating Python virtualenv at $VENV_DIR..."
     python3 -m venv "$VENV_DIR"
     chown -R "$KRONOS_USER:$KRONOS_USER" "$VENV_DIR"
-else
-    info "Virtualenv already exists."
 fi
 
-# ── 6. Install Python dependencies ───────────────────────────────────────────
+# ── 6. Install Python dependencies (run as root into venv, avoids cache perms) ─
 info "Installing PyTorch (CPU build)..."
-sudo -u "$KRONOS_USER" "$VENV_DIR/bin/pip" install --quiet --upgrade pip
-sudo -u "$KRONOS_USER" "$VENV_DIR/bin/pip" install --quiet \
+"$VENV_DIR/bin/pip" install --quiet --upgrade pip
+"$VENV_DIR/bin/pip" install --quiet \
     torch torchvision \
     --index-url https://download.pytorch.org/whl/cpu
 
 info "Installing Kronos requirements..."
-sudo -u "$KRONOS_USER" "$VENV_DIR/bin/pip" install --quiet \
+"$VENV_DIR/bin/pip" install --quiet \
     -r "$APP_DIR/requirements.txt"
 
 if [[ -f "$APP_DIR/vendor/kronos/requirements.txt" ]]; then
     info "Installing vendor/kronos requirements..."
-    sudo -u "$KRONOS_USER" "$VENV_DIR/bin/pip" install --quiet \
+    "$VENV_DIR/bin/pip" install --quiet \
         -r "$APP_DIR/vendor/kronos/requirements.txt"
 fi
+
+# Fix ownership after pip installs (pip may add root-owned files)
+chown -R "$KRONOS_USER:$KRONOS_USER" "$VENV_DIR"
 
 # ── 7. Create required directories ───────────────────────────────────────────
 info "Creating directories..."
