@@ -148,7 +148,16 @@ MIN_CONFIDENCE_BY_SOURCE: dict = {}
 #   Fix: switched to 1H ATR, TP=1.0×, SL=1.5× (same as M13 kronos-mini — identical horizon).
 #   1H ATR target (~0.65-1.3%) is dimensionally appropriate for 6H. Regime filter handles
 #   directional bias (blocks longs in BEAR, blocks shorts in BULL).
-DISABLED_MODEL_SOURCES: frozenset = frozenset()
+#
+# kronos-base (1H) execution halted 2026-06-09 — insufficient signal history to validate:
+#   Backtest: 56 total signals (36 longs, 20 shorts). Both sides negative EV.
+#   Longs: WR=13.9%, EV=-Rs 105/trade across all 4H candle states.
+#   Shorts: WR=35%, EV=-Rs 67/trade. Only 20 shorts — no filter bucket has n≥5 with
+#           positive EV. Best-looking result (n=2, EV=+Rs 364) is statistically noise.
+#   kronos-mini (117 shorts) drives all positive EV in pooled analysis; kronos-base
+#   adds no edge. Signal generator continues running to accumulate v5 data.
+#   Re-evaluate when kronos-base has 50+ resolved short signals in v5.
+DISABLED_MODEL_SOURCES: frozenset = frozenset({'kronos-base'})
 
 # A pending signal older than this is expired, not rejected (Section 10.1: 4H entry timeout)
 SIGNAL_EXPIRY_SECONDS = 4 * 3600
@@ -351,6 +360,25 @@ class RiskCheck:
             _regime_block = self._check_regime_direction_block(symbol, direction)
             if _regime_block:
                 rejection_reason = _regime_block
+
+        # ── kronos-mini 4H candle + volume filter (paper + live) ─────────────
+        # Option A — implemented 2026-06-09 based on backtest of 220 resolved signals.
+        #
+        # LONGS suspended entirely: 0-20% WR across all 4H candle states (n=83).
+        #   92.8% of longs fired against the 4H trend (structural model bias).
+        #   0% WR even when 4H candle is bullish — the best possible condition.
+        #
+        # SHORTS three-tier rule by 4H candle state:
+        #   Bearish (body≥30% range, close<open): execute if RVOL 0.75x–1.50x
+        #     n=14, WR=50%, EV=+Rs 178/trade
+        #   Neutral (body<30% of candle range):   execute if RVOL < 2.0x
+        #     n=31, WR=45%, EV=+Rs 54/trade
+        #   Bullish (body≥30% range, close>open): skip
+        #     n=27, WR=41%, EV=-Rs 85/trade (fighting 4H momentum)
+        if not rejection_reason:
+            _mini_block = RiskCheck._check_kronos_mini_filter(model_source, direction, symbol)
+            if _mini_block:
+                rejection_reason = _mini_block
 
         # ── Paper mode: benchmark fast-path ──────────────────────────────────
         # Goal: maximum throughput across all models for benchmark accuracy.
@@ -729,6 +757,145 @@ class RiskCheck:
 
         _regime_cache[symbol] = (regime, now + REGIME_CACHE_TTL)
         return regime
+
+    # ── kronos-mini filter helpers ────────────────────────────────────────────
+
+    @staticmethod
+    def _get_4h_candle_state(symbol: str) -> str:
+        """
+        Classify the most recent completed 4H candle for symbol.
+        Returns 'bearish', 'neutral', or 'bullish'.
+
+        Neutral = candle body (|close - open|) is less than 30% of the total
+        wick range (high - low). This captures doji, spinning-top, and other
+        indecision candles where neither buyers nor sellers dominated the bar.
+
+        Fails open ('neutral') on any DB error so a data gap never silently
+        blocks all short signals.
+        """
+        NEUTRAL_BODY_RATIO = 0.30
+        try:
+            with get_connection() as conn:
+                row = conn.execute(
+                    """SELECT open, high, low, close FROM ohlcv
+                       WHERE symbol=? AND timeframe='4h'
+                       ORDER BY timestamp DESC LIMIT 1""",
+                    (symbol,),
+                ).fetchone()
+            if not row:
+                return 'neutral'
+            o = float(row['open']); h = float(row['high'])
+            l = float(row['low']);  c = float(row['close'])
+            rng = h - l
+            if rng <= 0:
+                return 'neutral'
+            body_ratio = abs(c - o) / rng
+            if body_ratio < NEUTRAL_BODY_RATIO:
+                return 'neutral'
+            return 'bullish' if c > o else 'bearish'
+        except Exception as exc:
+            logger.warning('_get_4h_candle_state failed for %s: %s — failing open', symbol, exc)
+            return 'neutral'
+
+    @staticmethod
+    def _get_1h_rvol(symbol: str, period: int = 20) -> Optional[float]:
+        """
+        Compute RVOL = current 1H candle volume / rolling 20-period average volume.
+
+        Returns None if fewer than 2 candles are available so callers can fail open.
+        A return of None means 'insufficient data' — the filter should not block
+        on missing volume data.
+        """
+        try:
+            with get_connection() as conn:
+                rows = conn.execute(
+                    """SELECT volume FROM ohlcv
+                       WHERE symbol=? AND timeframe='1h'
+                       ORDER BY timestamp DESC LIMIT ?""",
+                    (symbol, period + 1),
+                ).fetchall()
+            if len(rows) < 2:
+                return None
+            curr_vol = float(rows[0]['volume'])
+            avg_vol  = sum(float(r['volume']) for r in rows[1:]) / len(rows[1:])
+            if avg_vol <= 0:
+                return None
+            return curr_vol / avg_vol
+        except Exception as exc:
+            logger.warning('_get_1h_rvol failed for %s: %s', symbol, exc)
+            return None
+
+    @staticmethod
+    def _check_kronos_mini_filter(
+        model_source: str,
+        direction:    str,
+        symbol:       str,
+    ) -> Optional[str]:
+        """
+        kronos-mini 1H direction and volume gate (Option A, 2026-06-09).
+
+        Applied in both paper and live mode so v5 data accumulates under the
+        same filter conditions used in live trading.
+
+        LONGS — suspended entirely.
+          Reason: 83 historical signals. WR=15.7%, EV=-Rs 156.8/trade.
+          0% WR even when 4H candle is bullish (n=6, best possible condition).
+          92.8% of longs fired against 4H downtrend — structural model bias,
+          not fixable with filters. Reinstate when model is retrained.
+
+        SHORTS — three-tier rule by 4H candle state + 1H RVOL:
+          Bearish (body≥30%, close<open): require RVOL 0.75x–1.50x
+            Backtest: n=14, WR=50%, EV=+Rs 178/trade
+          Neutral  (body<30% of range):  require RVOL < 2.0x
+            Backtest: n=31, WR=45%, EV=+Rs 54/trade (positive even unfiltered)
+          Bullish  (body≥30%, close>open): skip entirely
+            Backtest: n=27, WR=41%, EV=-Rs 85/trade — counter-trend, bad EV
+        """
+        if model_source != 'kronos-mini':
+            return None
+
+        # ── Longs: suspended ─────────────────────────────────────────────────
+        if direction == 'long':
+            return (
+                'kronos_mini_longs_suspended: '
+                'WR=15.7% EV=-Rs157/trade on 83 historical signals; '
+                '0% WR even on 4H-bullish-aligned longs (n=6). '
+                'Reinstate when model retrained. (2026-06-09)'
+            )
+
+        # ── Shorts: three-tier candle + volume gate ───────────────────────────
+        candle_state = RiskCheck._get_4h_candle_state(symbol)
+
+        if candle_state == 'bullish':
+            return (
+                f'kronos_mini_short_4h_bullish_blocked: '
+                f'{symbol} 4H candle bullish — counter-trend short. '
+                f'Backtest EV=-Rs85/trade (n=27). (2026-06-09)'
+            )
+
+        rvol = RiskCheck._get_1h_rvol(symbol)
+        if rvol is None:
+            return None   # no 1H volume data — fail open, allow signal
+
+        if candle_state == 'bearish':
+            if not (0.75 <= rvol <= 1.50):
+                return (
+                    f'kronos_mini_short_rvol_gate: '
+                    f'4H bearish but RVOL={rvol:.2f}x outside 0.75–1.50x band. '
+                    f'<0.75x=noise candle, >1.50x=capitulation/reversal risk. (2026-06-09)'
+                )
+            return None   # APPROVED: bearish 4H + confirmed volume band
+
+        if candle_state == 'neutral':
+            if rvol >= 2.0:
+                return (
+                    f'kronos_mini_short_rvol_gate: '
+                    f'4H neutral but RVOL={rvol:.2f}x >= 2.0x cap. '
+                    f'Extreme volume on neutral candle = panic/mean-reverting spike. (2026-06-09)'
+                )
+            return None   # APPROVED: neutral 4H + volume below panic threshold
+
+        return None   # unknown state — fail open
 
     @staticmethod
     def _check_regime_direction_block(symbol: str, direction: str) -> Optional[str]:
