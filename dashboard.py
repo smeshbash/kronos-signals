@@ -822,11 +822,14 @@ def get_data(f: dict) -> dict:
     _gh_reasons: dict = defaultdict(list)
     for _r in _gh_rr_raw:
         _gh_reasons[_r['model']].append((_r['rejection_reason'] or '', int(_r['cnt'])))
+    _gh_logs = {db_key: _read_gen_log(log_path)
+                for db_key, _, _, _, _, log_path in _GH_MODELS}
     gen_health = {
-        'now_ts':   _gh_ts,
-        'mh_24h':   _gh_24h,
-        'mh_ever':  _gh_ever,
+        'now_ts':     _gh_ts,
+        'mh_24h':     _gh_24h,
+        'mh_ever':    _gh_ever,
         'mh_reasons': dict(_gh_reasons),
+        'mh_logs':    _gh_logs,
     }
 
     return dict(
@@ -1332,12 +1335,12 @@ def _render_filter_bar(f: dict, all_symbols: list) -> str:
 # ── Generator health ──────────────────────────────────────────────────────────
 
 _GH_MODELS = [
-    # (db_key,          label,                    cycle_secs, code_disabled, disabled_reason)
-    ('kronos-mini',    'M13 · kronos-mini · 1H',   3600,  False, ''),
-    ('kronos-base',    'M14 · kronos-base · 1H',   3600,  True,  'Disabled in code — DISABLED_MODEL_SOURCES (2026-06-09)'),
-    ('kronos-mini-4h', 'M15 · kronos-mini · 4H',  14400,  False, ''),
-    ('kronos-base-4h', 'M16 · kronos-base · 4H',  14400,  False, ''),
-    ('custom',         'M04 · custom · 1H',         3600,  False, ''),
+    # (db_key,          label,                    cycle_secs, code_disabled, disabled_reason,               log_err)
+    ('kronos-mini',    'M13 · kronos-mini · 1H',   3600,  False, '',                                         '/var/log/kronos/13_mini_generator.err'),
+    ('kronos-base',    'M14 · kronos-base · 1H',   3600,  True,  'Disabled in code — DISABLED_MODEL_SOURCES (2026-06-09)', '/var/log/kronos/14_base_generator.err'),
+    ('kronos-mini-4h', 'M15 · kronos-mini · 4H',  14400,  False, '',                                         '/var/log/kronos/15_mini_4h_generator.err'),
+    ('kronos-base-4h', 'M16 · kronos-base · 4H',  14400,  False, '',                                         '/var/log/kronos/16_base_4h_generator.err'),
+    ('custom',         'M04 · custom · 1H',         3600,  False, '',                                         '/var/log/kronos/04_signal_generator.err'),
 ]
 
 _GH_REASON_MAP = [
@@ -1368,6 +1371,72 @@ _GH_REASON_MAP = [
 ]
 
 
+def _read_gen_log(log_path: str) -> dict:
+    """Read last 10 KB of a generator .err log and extract operational state.
+
+    Returns a dict with keys:
+      loaded      bool   — model loaded line found after most-recent process start
+      scheduled   bool   — scheduler-started line found after most-recent start
+      last_job_ts float  — unix ts of most-recent 'executed successfully' line, or None
+      job_running bool   — 'Running job' seen after most-recent 'executed successfully'
+      not_ready   bool   — 'not ready — skipping' seen (model load failed, cycling no-ops)
+      error_line  str    — first error/traceback line found, or ''
+      log_ok      bool   — False only if file unreadable
+    """
+    result = dict(loaded=False, scheduled=False, last_job_ts=None,
+                  job_running=False, not_ready=False, error_line='', log_ok=True)
+    try:
+        with open(log_path, 'rb') as _f:
+            _f.seek(0, 2)
+            _f.seek(max(0, _f.tell() - 10240))
+            lines = _f.read().decode('utf-8', errors='replace').splitlines()
+    except (FileNotFoundError, PermissionError, OSError):
+        result['log_ok'] = False
+        return result
+
+    # Find the most-recent process-start boundary (supervisord truncates nothing —
+    # successive starts just append, so we find the last "scheduler started" cluster).
+    # We scan bottom-up so the most-recent info wins.
+    found_start = False
+    for line in reversed(lines):
+        ll = line.lower()
+        if 'loaded — context=' in ll or 'model ready' in ll or 'model loaded' in ll:
+            result['loaded'] = True
+            found_start = True
+        if 'scheduler started' in ll:
+            result['scheduled'] = True
+            found_start = True
+        if found_start and result['loaded'] and result['scheduled']:
+            break  # have what we need from the most-recent start
+
+    for line in reversed(lines):
+        ll = line.lower()
+        if 'executed successfully' in ll:
+            try:
+                result['last_job_ts'] = time.mktime(
+                    time.strptime(line[:19], '%Y-%m-%d %H:%M:%S'))
+            except Exception:
+                pass
+            break
+
+    for line in reversed(lines):
+        if 'Running job' in line:
+            result['job_running'] = True
+            break
+        if 'executed successfully' in line:
+            break  # job completed cleanly, not mid-run
+
+    for line in lines[-60:]:
+        ll = line.lower()
+        if 'not ready' in ll and 'skipping' in ll:
+            result['not_ready'] = True
+        if ('traceback' in ll or 'error:' in ll or 'permissionerror' in ll
+                or 'import failed' in ll) and not result['error_line']:
+            result['error_line'] = line.strip()[:90]
+
+    return result
+
+
 def _gh_categorize(reason: str) -> tuple:
     if not reason:
         return 'filter', 'Unknown rejection reason', 'mh-rr-filter'
@@ -1383,35 +1452,64 @@ def _render_gen_health(d: dict) -> str:
     mh_24h  = gh.get('mh_24h',    {})
     mh_ever = gh.get('mh_ever',   {})
     mh_reas = gh.get('mh_reasons', {})
+    mh_logs = gh.get('mh_logs',   {})
     now_ts  = gh.get('now_ts', int(time.time()))
 
+    def _age(ts):
+        m = int((now_ts - ts) // 60)
+        return f'{m}m ago' if m < 120 else f'{m//60}h {m%60:02d}m ago'
+
     cards = ''
-    for db_key, label, cycle_secs, code_disabled, dis_reason in _GH_MODELS:
+    for db_key, label, cycle_secs, code_disabled, dis_reason, _ in _GH_MODELS:
         row      = mh_24h.get(db_key, {})
         last_ts  = mh_ever.get(db_key)
         total_24 = int(row.get('total',    0))
         rej_24   = int(row.get('rejected', 0))
         gen_24   = int(row.get('generated',0))
         reasons  = mh_reas.get(db_key, [])
+        log      = mh_logs.get(db_key, {})
 
-        stale_secs = 2.5 * cycle_secs
+        log_ok      = log.get('log_ok', False)
+        loaded      = log.get('loaded', False)
+        scheduled   = log.get('scheduled', False)
+        not_ready   = log.get('not_ready', False)
+        error_line  = log.get('error_line', '')
+        last_job_ts = log.get('last_job_ts')
+        job_running = log.get('job_running', False)
 
-        def _age(ts):
-            m = (now_ts - ts) // 60
-            return f'{m}m ago' if m < 120 else f'{m//60}h {m%60:02d}m ago'
-
+        # ── Determine status ────────────────────────────────────────────────────
         if code_disabled:
             st, sc, bc = 'DISABLED', '#97a0af', '#dfe1e6'
             detail = f'<div class="mh-detail" style="color:#97a0af">{dis_reason}</div>'
 
-        elif last_ts is None or (now_ts - last_ts) > stale_secs:
-            st, sc, bc = 'SILENT', '#ff5630', '#ff5630'
-            why = ('never generated a signal — model may not have loaded'
-                   if last_ts is None
-                   else f'last signal {_age(last_ts)} — model may have crashed or is loading')
-            detail = f'<div class="mh-detail" style="color:#ff5630">{why}</div>'
+        elif not log_ok:
+            # Log file missing or unreadable — process may never have started
+            st, sc, bc = 'NO LOG', '#ff5630', '#ff5630'
+            detail = '<div class="mh-detail" style="color:#ff5630">Log file not found — process may not have started</div>'
 
-        elif total_24 > 0 and total_24 == rej_24:
+        elif error_line and not loaded:
+            # Error in log and model never confirmed loaded → crashed on startup
+            st, sc, bc = 'ERROR', '#ff5630', '#ff5630'
+            safe = error_line.replace('<', '&lt;').replace('>', '&gt;')
+            detail = f'<div class="mh-detail" style="color:#ff5630">{safe}</div>'
+
+        elif not_ready and not loaded:
+            # Scheduler running but model never loaded — stuck skipping every cycle
+            st, sc, bc = 'NOT READY', '#ff5630', '#ff5630'
+            detail = '<div class="mh-detail" style="color:#ff5630">Model failed to load — every cycle is a no-op</div>'
+
+        elif loaded and scheduled and total_24 == 0 and rej_24 == 0:
+            # Model confirmed loaded by log, but no DB signals yet — waiting between cycles
+            job_info = ''
+            if last_job_ts:
+                job_info = f' &mdash; last job {_age(last_job_ts)}'
+            elif job_running:
+                job_info = ' &mdash; job currently running'
+            st, sc, bc = 'WAITING', '#36b37e', '#36b37e'
+            detail = f'<div class="mh-detail">Model loaded &amp; scheduler active{job_info} &mdash; no signals this cycle yet</div>'
+
+        elif loaded and scheduled and total_24 > 0 and total_24 == rej_24:
+            # Model running, generated signals, but M5 rejected all of them
             st, sc, bc = 'BLOCKED', '#ff991f', '#ff991f'
             reason_counts: dict = defaultdict(int)
             for reason_str, cnt in reasons:
@@ -1421,9 +1519,23 @@ def _render_gen_health(d: dict) -> str:
                 f'<span class="{css}">{friendly} &times;{cnt}</span>'
                 for (friendly, css), cnt in sorted(reason_counts.items(), key=lambda x: -x[1])
             )
-            detail = (f'<div class="mh-detail">{total_24} signals today, all rejected'
+            detail = (f'<div class="mh-detail">{total_24} signals today, all blocked by M5'
                       f' &mdash; last {_age(last_ts)}</div>'
                       f'<div class="mh-reasons">{pills}</div>')
+
+        elif total_24 > 0 and gen_24 > 0:
+            # Signals generated and at least some passed risk
+            st, sc, bc = 'ACTIVE', '#36b37e', '#36b37e'
+            detail = (f'<div class="mh-detail">{total_24} signals today &mdash; '
+                      f'{gen_24} passed risk &mdash; last {_age(last_ts)}</div>')
+
+        elif last_ts is None or (now_ts - last_ts) > 2.5 * cycle_secs:
+            # Fallback: no log confirmation + no recent signals
+            st, sc, bc = 'SILENT', '#ff5630', '#ff5630'
+            why = ('never generated a signal — model may still be loading'
+                   if last_ts is None
+                   else f'last signal {_age(last_ts)} — may have crashed')
+            detail = f'<div class="mh-detail" style="color:#ff5630">{why}</div>'
 
         else:
             st, sc, bc = 'ACTIVE', '#36b37e', '#36b37e'
@@ -1442,7 +1554,7 @@ def _render_gen_health(d: dict) -> str:
 <div class="section" style="margin-bottom:12px">
   <div class="section-hdr">Generator Health
     <span class="tag" style="text-transform:none;font-weight:400;font-size:.67rem">
-      last 24H &nbsp;·&nbsp; auto-refresh
+      log + DB &nbsp;·&nbsp; auto-refresh
     </span>
   </div>
   <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px">
