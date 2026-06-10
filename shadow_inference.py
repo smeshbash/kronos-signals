@@ -43,7 +43,7 @@ TIMEFRAME    = '4h'
 PRED_LEN     = 6   # 6 × 4H = 24H horizon (identical to M4)
 ATR_PERIOD   = 14  # must match M4
 
-_SAMPLE_COUNT = int(os.environ.get('KRONOS_SHADOW_SAMPLE_COUNT', '30'))
+_SAMPLE_COUNT = int(os.environ.get('KRONOS_SHADOW_SAMPLE_COUNT', '50'))
 
 # Per-model HuggingFace IDs, default context lengths, and env overrides.
 _MODEL_SPECS: dict[str, dict] = {
