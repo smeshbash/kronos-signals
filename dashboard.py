@@ -792,6 +792,43 @@ def get_data(f: dict) -> dict:
         ORDER BY cnt DESC LIMIT 12
     """, (int(time.time()) - 86400,))
 
+    # 9. Generator health — per-model signal counts + rejection reasons (last 24H)
+    _gh_ts = int(time.time())
+    _gh_24h = {r['model']: r for r in _q("""
+        SELECT COALESCE(model_source,'custom') AS model,
+               COUNT(*) AS total,
+               SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END) AS rejected,
+               SUM(CASE WHEN status IN ('executed','approved','pending') THEN 1 ELSE 0 END) AS generated,
+               MAX(signal_timestamp) AS last_ts
+        FROM signals
+        WHERE signal_timestamp > ?
+        GROUP BY COALESCE(model_source,'custom')
+    """, (_gh_ts - 86400,))}
+    _gh_ever = {r['model']: r['last_ts'] for r in _q("""
+        SELECT COALESCE(model_source,'custom') AS model,
+               MAX(signal_timestamp) AS last_ts
+        FROM signals
+        GROUP BY COALESCE(model_source,'custom')
+    """)}
+    _gh_rr_raw = _q("""
+        SELECT COALESCE(model_source,'custom') AS model,
+               rejection_reason,
+               COUNT(*) AS cnt
+        FROM signals
+        WHERE status='rejected' AND signal_timestamp > ?
+        GROUP BY COALESCE(model_source,'custom'), rejection_reason
+        ORDER BY cnt DESC
+    """, (_gh_ts - 86400,))
+    _gh_reasons: dict = defaultdict(list)
+    for _r in _gh_rr_raw:
+        _gh_reasons[_r['model']].append((_r['rejection_reason'] or '', int(_r['cnt'])))
+    gen_health = {
+        'now_ts':   _gh_ts,
+        'mh_24h':   _gh_24h,
+        'mh_ever':  _gh_ever,
+        'mh_reasons': dict(_gh_reasons),
+    }
+
     return dict(
         pf=pf, model_pf=model_pf,
         gross=gross, net=net, tds=tds,
@@ -814,6 +851,7 @@ def get_data(f: dict) -> dict:
         weekly_trend=weekly_trend,
         events_log=events_log,
         activity=activity,
+        gen_health=gen_health,
         ts=int(time.time()),
     )
 
@@ -1033,6 +1071,18 @@ tr:hover td{background:#f8f9fb}
 .chart-wrap{padding:16px;height:260px;position:relative}
 
 .footer{text-align:center;padding:14px;font-size:.7rem;color:#97a0af}
+
+/* ── Generator health cards ── */
+.mh-card{background:#fff;border-radius:6px;padding:10px 12px;border:1px solid #dfe1e6}
+.mh-status{font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px}
+.mh-name{font-size:.78rem;font-weight:600;color:#172b4d;margin-bottom:4px}
+.mh-detail{font-size:.71rem;color:#6b778c;margin-bottom:3px;line-height:1.4}
+.mh-reasons{display:flex;flex-wrap:wrap;gap:3px;margin-top:3px}
+.mh-rr-market  {font-size:.65rem;padding:2px 6px;border-radius:3px;background:#fffae6;color:#7a5200;border:1px solid #ffe380;display:inline-block}
+.mh-rr-halted  {font-size:.65rem;padding:2px 6px;border-radius:3px;background:#ffebe6;color:#bf2600;border:1px solid #ffbdad;display:inline-block}
+.mh-rr-system  {font-size:.65rem;padding:2px 6px;border-radius:3px;background:#ffe2de;color:#bf2600;border:1px solid #ff7452;display:inline-block}
+.mh-rr-filter  {font-size:.65rem;padding:2px 6px;border-radius:3px;background:#f4f5f7;color:#5e6c84;border:1px solid #dfe1e6;display:inline-block}
+.mh-rr-disabled{font-size:.65rem;padding:2px 6px;border-radius:3px;background:#f4f5f7;color:#97a0af;border:1px solid #dfe1e6;display:inline-block}
 </style>
 """
 
@@ -1278,6 +1328,128 @@ def _render_filter_bar(f: dict, all_symbols: list) -> str:
 
 
 # ── Tab 1: Summary pane ───────────────────────────────────────────────────────
+
+# ── Generator health ──────────────────────────────────────────────────────────
+
+_GH_MODELS = [
+    # (db_key,          label,                    cycle_secs, code_disabled, disabled_reason)
+    ('kronos-mini',    'M13 · kronos-mini · 1H',   3600,  False, ''),
+    ('kronos-base',    'M14 · kronos-base · 1H',   3600,  True,  'Disabled in code — DISABLED_MODEL_SOURCES (2026-06-09)'),
+    ('kronos-mini-4h', 'M15 · kronos-mini · 4H',  14400,  False, ''),
+    ('kronos-base-4h', 'M16 · kronos-base · 4H',  14400,  False, ''),
+    ('custom',         'M04 · custom · 1H',         3600,  False, ''),
+]
+
+_GH_REASON_MAP = [
+    # (substring, category, friendly_label, css_class)
+    ('longs_suspended',             'halted',  'Longs halted — poor WR, awaiting retrain', 'mh-rr-halted'),
+    ('short_4h_bullish_blocked',    'market',  'Short blocked — 4H candle bullish',         'mh-rr-market'),
+    ('short_daily_bullish_blocked', 'market',  'Short blocked — daily candle bullish',      'mh-rr-market'),
+    ('regime_bull_short_blocked',   'market',  'Short blocked — bull regime (EMA200)',      'mh-rr-market'),
+    ('regime_bear_long_blocked',    'market',  'Long blocked — bear regime (EMA200)',       'mh-rr-market'),
+    ('short_rvol_gate',             'market',  'Short blocked — RVOL out of band',          'mh-rr-market'),
+    ('model_disabled',              'disabled','Model disabled in code',                    'mh-rr-disabled'),
+    ('system_halted',               'system',  'System halted — red alert',                 'mh-rr-system'),
+    ('orange_alert',                'system',  'Orange alert — no new entries',             'mh-rr-system'),
+    ('yellow_alert',                'system',  'Yellow alert — Slot 3 blocked',             'mh-rr-system'),
+    ('forced_override',             'system',  'Forced override active',                    'mh-rr-system'),
+    ('funding_settlement_blackout', 'filter',  'Funding settlement blackout',               'mh-rr-filter'),
+    ('macro_blackout',              'filter',  'Macro event blackout',                      'mh-rr-filter'),
+    ('stop_loss_4h_blackout',       'filter',  'Post stop-loss blackout (4H)',              'mh-rr-filter'),
+    ('circuit_breaker',             'filter',  'Circuit breaker — extreme volatility',      'mh-rr-filter'),
+    ('confidence_gate',             'filter',  'Below confidence threshold',                'mh-rr-filter'),
+    ('return_floor',                'filter',  'Below return floor',                        'mh-rr-filter'),
+    ('entry_cost',                  'filter',  'Entry cost too high',                       'mh-rr-filter'),
+    ('position_cap',                'filter',  'Position cap reached',                      'mh-rr-filter'),
+    ('stacking',                    'filter',  'Signal stacking guard',                     'mh-rr-filter'),
+    ('correlation',                 'filter',  'Correlation guard',                         'mh-rr-filter'),
+    ('asset_excluded',              'filter',  'Asset excluded',                            'mh-rr-filter'),
+    ('signal_expired',              'filter',  'Signal expired',                            'mh-rr-filter'),
+]
+
+
+def _gh_categorize(reason: str) -> tuple:
+    if not reason:
+        return 'filter', 'Unknown rejection reason', 'mh-rr-filter'
+    rl = reason.lower()
+    for substr, cat, label, css in _GH_REASON_MAP:
+        if substr in rl:
+            return cat, label, css
+    return 'filter', (reason[:55] + '…' if len(reason) > 55 else reason), 'mh-rr-filter'
+
+
+def _render_gen_health(d: dict) -> str:
+    gh      = d.get('gen_health', {})
+    mh_24h  = gh.get('mh_24h',    {})
+    mh_ever = gh.get('mh_ever',   {})
+    mh_reas = gh.get('mh_reasons', {})
+    now_ts  = gh.get('now_ts', int(time.time()))
+
+    cards = ''
+    for db_key, label, cycle_secs, code_disabled, dis_reason in _GH_MODELS:
+        row      = mh_24h.get(db_key, {})
+        last_ts  = mh_ever.get(db_key)
+        total_24 = int(row.get('total',    0))
+        rej_24   = int(row.get('rejected', 0))
+        gen_24   = int(row.get('generated',0))
+        reasons  = mh_reas.get(db_key, [])
+
+        stale_secs = 2.5 * cycle_secs
+
+        def _age(ts):
+            m = (now_ts - ts) // 60
+            return f'{m}m ago' if m < 120 else f'{m//60}h {m%60:02d}m ago'
+
+        if code_disabled:
+            st, sc, bc = 'DISABLED', '#97a0af', '#dfe1e6'
+            detail = f'<div class="mh-detail" style="color:#97a0af">{dis_reason}</div>'
+
+        elif last_ts is None or (now_ts - last_ts) > stale_secs:
+            st, sc, bc = 'SILENT', '#ff5630', '#ff5630'
+            why = ('never generated a signal — model may not have loaded'
+                   if last_ts is None
+                   else f'last signal {_age(last_ts)} — model may have crashed or is loading')
+            detail = f'<div class="mh-detail" style="color:#ff5630">{why}</div>'
+
+        elif total_24 > 0 and total_24 == rej_24:
+            st, sc, bc = 'BLOCKED', '#ff991f', '#ff991f'
+            reason_counts: dict = defaultdict(int)
+            for reason_str, cnt in reasons:
+                _, friendly, css = _gh_categorize(reason_str)
+                reason_counts[(friendly, css)] += cnt
+            pills = ''.join(
+                f'<span class="{css}">{friendly} &times;{cnt}</span>'
+                for (friendly, css), cnt in sorted(reason_counts.items(), key=lambda x: -x[1])
+            )
+            detail = (f'<div class="mh-detail">{total_24} signals today, all rejected'
+                      f' &mdash; last {_age(last_ts)}</div>'
+                      f'<div class="mh-reasons">{pills}</div>')
+
+        else:
+            st, sc, bc = 'ACTIVE', '#36b37e', '#36b37e'
+            detail = (f'<div class="mh-detail">{total_24} signals today &mdash; '
+                      f'{gen_24} passed risk &mdash; last {_age(last_ts)}</div>')
+
+        dot = '⊘' if code_disabled else '●'
+        cards += f'''
+<div class="mh-card" style="border-left:3px solid {bc}">
+  <div class="mh-status" style="color:{sc}">{dot} {st}</div>
+  <div class="mh-name">{label}</div>
+  {detail}
+</div>'''
+
+    return f'''
+<div class="section" style="margin-bottom:12px">
+  <div class="section-hdr">Generator Health
+    <span class="tag" style="text-transform:none;font-weight:400;font-size:.67rem">
+      last 24H &nbsp;·&nbsp; auto-refresh
+    </span>
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px">
+    {cards}
+  </div>
+</div>'''
+
 
 def _render_summary_pane(d: dict, f: dict, notice: str) -> str:
     fc = _filter_count(f)
@@ -1540,7 +1712,7 @@ def _render_summary_pane(d: dict, f: dict, notice: str) -> str:
             '</div></div>'
         )
 
-    return notice + quality_notice + cards + pos_html + hist_html + recent_html
+    return notice + quality_notice + _render_gen_health(d) + cards + pos_html + hist_html + recent_html
 
 
 # ── Tab 2: Analysis pane ──────────────────────────────────────────────────────
