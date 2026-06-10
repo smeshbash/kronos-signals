@@ -206,8 +206,8 @@ def _get_filters() -> dict:
         direction = ''
     try:    days    = int(request.args.get('days',    30))
     except: days    = 30
-    try:    regime  = int(request.args.get('regime',   5))
-    except: regime  = 5
+    try:    regime  = int(request.args.get('regime',   0))
+    except: regime  = 0
     try:    page    = max(0, int(request.args.get('page',    0)))
     except: page    = 0
     try:    sigpage = max(0, int(request.args.get('sigpage', 0)))
