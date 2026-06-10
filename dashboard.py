@@ -1498,19 +1498,10 @@ def _render_gen_health(d: dict) -> str:
             st, sc, bc = 'NOT READY', '#ff5630', '#ff5630'
             detail = '<div class="mh-detail" style="color:#ff5630">Model failed to load — every cycle is a no-op</div>'
 
-        elif loaded and scheduled and total_24 == 0 and rej_24 == 0:
-            # Model confirmed loaded by log, but no DB signals yet — waiting between cycles
-            job_info = ''
-            if last_job_ts:
-                job_info = f' &mdash; last job {_age(last_job_ts)}'
-            elif job_running:
-                job_info = ' &mdash; job currently running'
-            st, sc, bc = 'WAITING', '#36b37e', '#36b37e'
-            detail = f'<div class="mh-detail">Model loaded &amp; scheduler active{job_info} &mdash; no signals this cycle yet</div>'
+        else:
+            stale = last_ts is None or (now_ts - last_ts) > stale_secs
 
-        elif loaded and scheduled and total_24 > 0 and total_24 == rej_24:
-            # Model running, generated signals, but M5 rejected all of them
-            st, sc, bc = 'BLOCKED', '#ff991f', '#ff991f'
+            # Build rejection pills (used by BLOCKED branch)
             reason_counts: dict = defaultdict(int)
             for reason_str, cnt in reasons:
                 _, friendly, css = _gh_categorize(reason_str)
@@ -1519,28 +1510,41 @@ def _render_gen_health(d: dict) -> str:
                 f'<span class="{css}">{friendly} &times;{cnt}</span>'
                 for (friendly, css), cnt in sorted(reason_counts.items(), key=lambda x: -x[1])
             )
-            detail = (f'<div class="mh-detail">{total_24} signals today, all blocked by M5'
-                      f' &mdash; last {_age(last_ts)}</div>'
-                      f'<div class="mh-reasons">{pills}</div>')
 
-        elif total_24 > 0 and gen_24 > 0:
-            # Signals generated and at least some passed risk
-            st, sc, bc = 'ACTIVE', '#36b37e', '#36b37e'
-            detail = (f'<div class="mh-detail">{total_24} signals today &mdash; '
-                      f'{gen_24} passed risk &mdash; last {_age(last_ts)}</div>')
+            if not stale and total_24 > 0 and gen_24 > 0:
+                # Recent signals and some passed risk — genuinely active
+                st, sc, bc = 'ACTIVE', '#36b37e', '#36b37e'
+                detail = (f'<div class="mh-detail">{total_24} signals today &mdash; '
+                          f'{gen_24} passed risk &mdash; last {_age(last_ts)}</div>')
 
-        elif last_ts is None or (now_ts - last_ts) > 2.5 * cycle_secs:
-            # Fallback: no log confirmation + no recent signals
-            st, sc, bc = 'SILENT', '#ff5630', '#ff5630'
-            why = ('never generated a signal — model may still be loading'
-                   if last_ts is None
-                   else f'last signal {_age(last_ts)} — may have crashed')
-            detail = f'<div class="mh-detail" style="color:#ff5630">{why}</div>'
+            elif not stale and total_24 > 0 and total_24 == rej_24:
+                # Recent signals but M5 rejected every one — show why
+                st, sc, bc = 'BLOCKED', '#ff991f', '#ff991f'
+                detail = (f'<div class="mh-detail">{total_24} signals today, all blocked by M5'
+                          f' &mdash; last {_age(last_ts)}</div>'
+                          f'<div class="mh-reasons">{pills}</div>')
 
-        else:
-            st, sc, bc = 'ACTIVE', '#36b37e', '#36b37e'
-            detail = (f'<div class="mh-detail">{total_24} signals today &mdash; '
-                      f'{gen_24} passed risk &mdash; last {_age(last_ts)}</div>')
+            else:
+                # Stale or no recent signals — model alive but idle
+                job_info = ''
+                if last_job_ts:
+                    job_info = f' &mdash; last job {_age(last_job_ts)}'
+                elif job_running:
+                    job_info = ' &mdash; job currently running'
+                if loaded and scheduled:
+                    st, sc, bc = 'WAITING', '#36b37e', '#36b37e'
+                    last_info = (f' &mdash; last signal {_age(last_ts)}'
+                                 if last_ts and not stale else '')
+                    # Show any rejection breakdown from older signals if present
+                    pills_section = f'<div class="mh-reasons">{pills}</div>' if pills else ''
+                    detail = (f'<div class="mh-detail">Model loaded &amp; scheduler active'
+                              f'{job_info}{last_info}</div>{pills_section}')
+                else:
+                    st, sc, bc = 'SILENT', '#ff5630', '#ff5630'
+                    why = ('never generated a signal — model may still be loading'
+                           if last_ts is None
+                           else f'last signal {_age(last_ts)} — may have crashed')
+                    detail = f'<div class="mh-detail" style="color:#ff5630">{why}</div>'
 
         dot = '⊘' if code_disabled else '●'
         cards += f'''
