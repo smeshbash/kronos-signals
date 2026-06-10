@@ -60,7 +60,7 @@ TIMEFRAME     = '1h'
 PRED_LEN      = 6          # 6 × 1H = 6H horizon
 HORIZON       = '6h'
 ATR_PERIOD    = 14
-SAMPLE_COUNT  = int(os.environ.get('KRONOS_SHADOW_SAMPLE_COUNT', '50'))
+SAMPLE_COUNT  = int(os.environ.get('KRONOS_SHADOW_SAMPLE_COUNT', '100'))
 
 CONTEXT_LEN = int(os.environ.get('KRONOS_MINI_CONTEXT', '2048'))  # full capacity
 
@@ -232,19 +232,24 @@ class MiniGenerator:
                 return None
 
             # ── Sample-distribution confidence ────────────────────────────────
-            # predict_samples() returns (SAMPLE_COUNT, PRED_LEN, 6_features).
+            # predict_batch() with SAMPLE_COUNT copies of the same input runs all
+            # samples in one batched GPU forward pass. Each batch element samples
+            # independently (T=1.0, top_p=0.9) → distinct stochastic paths.
             # Column order: open, high, low, close, volume, amount → close = idx 3.
             _CLOSE_IDX = 3
-            raw_samples = self._predictor.predict_samples(
-                df=ohlcv_df,
-                x_timestamp=x_timestamp,
-                y_timestamp=y_timestamp,
-                pred_len=PRED_LEN,
-                T=1.0,
-                top_p=0.9,
-                sample_count=SAMPLE_COUNT,
-                verbose=False,
-            )  # (SAMPLE_COUNT, PRED_LEN, 6)
+            raw_samples = np.stack([
+                df.values
+                for df in self._predictor.predict_batch(
+                    df_list=[ohlcv_df] * SAMPLE_COUNT,
+                    x_timestamp_list=[x_timestamp] * SAMPLE_COUNT,
+                    y_timestamp_list=[y_timestamp] * SAMPLE_COUNT,
+                    pred_len=PRED_LEN,
+                    T=1.0,
+                    top_p=0.9,
+                    sample_count=1,
+                    verbose=False,
+                )
+            ], axis=0)  # (SAMPLE_COUNT, PRED_LEN, 6)
 
             sample_finals = raw_samples[:, -1, _CLOSE_IDX]   # final close per sample
             if len(sample_finals) == 0:

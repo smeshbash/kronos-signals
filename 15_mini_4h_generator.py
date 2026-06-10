@@ -72,7 +72,7 @@ TIMEFRAME     = '4h'
 PRED_LEN      = 6           # 6 × 4H = 24H horizon — matches M4 custom model
 HORIZON       = '24h'
 ATR_PERIOD    = 14
-SAMPLE_COUNT  = int(os.environ.get('KRONOS_SHADOW_SAMPLE_COUNT', '50'))
+SAMPLE_COUNT  = int(os.environ.get('KRONOS_SHADOW_SAMPLE_COUNT', '100'))
 
 # Full 2048-candle 4H context ≈ 341 days. Override via env if needed.
 CONTEXT_LEN = int(os.environ.get('KRONOS_MINI_4H_CONTEXT', '2048'))
@@ -241,18 +241,23 @@ class Mini4HGenerator:
                 return None
 
             # ── Sample-distribution confidence ──────────────────────────────
-            # predict_samples: (SAMPLE_COUNT, PRED_LEN, 6) — close = col 3
+            # predict_batch() with SAMPLE_COUNT copies of the same input runs all
+            # samples in one batched GPU forward pass. Each batch element samples
+            # independently (T=1.0, top_p=0.9) → distinct stochastic paths.
             _CLOSE_IDX  = 3
-            raw_samples = self._predictor.predict_samples(
-                df=ohlcv_df,
-                x_timestamp=x_timestamp,
-                y_timestamp=y_timestamp,
-                pred_len=PRED_LEN,
-                T=1.0,
-                top_p=0.9,
-                sample_count=SAMPLE_COUNT,
-                verbose=False,
-            )
+            raw_samples = np.stack([
+                df.values
+                for df in self._predictor.predict_batch(
+                    df_list=[ohlcv_df] * SAMPLE_COUNT,
+                    x_timestamp_list=[x_timestamp] * SAMPLE_COUNT,
+                    y_timestamp_list=[y_timestamp] * SAMPLE_COUNT,
+                    pred_len=PRED_LEN,
+                    T=1.0,
+                    top_p=0.9,
+                    sample_count=1,
+                    verbose=False,
+                )
+            ], axis=0)  # (SAMPLE_COUNT, PRED_LEN, 6)
 
             sample_finals = raw_samples[:, -1, _CLOSE_IDX]
             if len(sample_finals) == 0:
