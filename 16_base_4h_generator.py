@@ -387,4 +387,21 @@ class Base4HGenerator:
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
-    asyncio.run(Base4HGenerator().start())
+    import argparse
+    ap = argparse.ArgumentParser(description='Kronos-base 4H signal generator')
+    ap.add_argument('--once',    action='store_true',
+                    help='Run a single generation cycle immediately and exit')
+    ap.add_argument('--samples', type=int, default=None,
+                    help='Override KRONOS_SHADOW_SAMPLE_COUNT for this run')
+    args = ap.parse_args()
+
+    if args.samples is not None:
+        SAMPLE_COUNT = args.samples
+        log.info('Sample count overridden via --samples: %d', SAMPLE_COUNT)
+
+    if args.once:
+        gen = Base4HGenerator()
+        gen._load_model()
+        gen.generate()
+    else:
+        asyncio.run(Base4HGenerator().start())
