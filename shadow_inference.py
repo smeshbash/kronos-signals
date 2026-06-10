@@ -43,7 +43,7 @@ TIMEFRAME    = '4h'
 PRED_LEN     = 6   # 6 × 4H = 24H horizon (identical to M4)
 ATR_PERIOD   = 14  # must match M4
 
-_SAMPLE_COUNT = int(os.environ.get('KRONOS_SHADOW_SAMPLE_COUNT', '50'))
+_SAMPLE_COUNT = int(os.environ.get('KRONOS_SHADOW_SAMPLE_COUNT', '200'))
 
 # Per-model HuggingFace IDs, default context lengths, and env overrides.
 _MODEL_SPECS: dict[str, dict] = {
@@ -234,21 +234,22 @@ class ShadowInference:
             x_timestamp = pd.Series(pd.to_datetime(ts_unix,   unit='s', utc=True))
             y_timestamp = pd.Series(pd.to_datetime(future_ts, unit='s', utc=True))
 
-            # predict() averages samples internally; call once per sample to
-            # preserve the distribution. Shape: (sample_count, PRED_LEN, 6).
+            # predict_batch() with _SAMPLE_COUNT copies of the same input runs all
+            # samples in one batched GPU forward pass. Each batch element samples
+            # independently (T=1.0, top_p=0.9) → distinct stochastic paths.
             _CLOSE_IDX  = 3
             raw_samples = np.stack([
-                predictor.predict(
-                    df=ohlcv_df,
-                    x_timestamp=x_timestamp,
-                    y_timestamp=y_timestamp,
+                df.values
+                for df in predictor.predict_batch(
+                    df_list=[ohlcv_df] * _SAMPLE_COUNT,
+                    x_timestamp_list=[x_timestamp] * _SAMPLE_COUNT,
+                    y_timestamp_list=[y_timestamp] * _SAMPLE_COUNT,
                     pred_len=PRED_LEN,
                     T=1.0,
                     top_p=0.9,
                     sample_count=1,
                     verbose=False,
-                ).values
-                for _ in range(_SAMPLE_COUNT)
+                )
             ], axis=0)  # (_SAMPLE_COUNT, PRED_LEN, 6)
         except Exception as exc:
             log_event(MODULE, 'error', 'error',

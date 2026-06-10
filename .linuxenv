@@ -30,8 +30,8 @@ KRONOS_REGIME_FILTER=false
 
 # ── Model inference ───────────────────────────────────────────────────────────
 # Set to cuda if the machine has a GPU, otherwise leave as cpu
-KRONOS_SHADOW_DEVICE=cpu
-KRONOS_SHADOW_SAMPLE_COUNT=50
+KRONOS_SHADOW_DEVICE=cuda
+KRONOS_SHADOW_SAMPLE_COUNT=200
 KRONOS_MINI_CONTEXT=2048
 KRONOS_MINI_4H_CONTEXT=2048
 KRONOS_BASE_CONTEXT=512
