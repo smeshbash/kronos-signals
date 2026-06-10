@@ -38,8 +38,8 @@ echo ""
 [[ "$USE_CUDA" == "true" ]] && echo "  Mode: CUDA (MX series GPU)" || echo "  Mode: CPU-only (safe default)"
 echo ""
 
-# ── 1/7  System packages ──────────────────────────────────────────────────────
-echo "─── 1/7  System packages"
+# ── 1/8  System packages ──────────────────────────────────────────────────────
+echo "─── 1/8  System packages"
 sudo apt-get update -qq
 sudo apt-get install -y --no-install-recommends \
     python3 python3-venv python3-pip python3-dev \
@@ -47,13 +47,13 @@ sudo apt-get install -y --no-install-recommends \
     libsqlite3-dev ca-certificates
 echo "  ✓ done"
 
-# ── 2/7  Directories ──────────────────────────────────────────────────────────
-echo "─── 2/7  Directories"
+# ── 2/8  Directories ──────────────────────────────────────────────────────────
+echo "─── 2/8  Directories"
 mkdir -p "$KRONOS_DIR/data" "$KRONOS_DIR/models" "$LOG_DIR"
 echo "  ✓ data/  models/  logs/"
 
-# ── 3/7  .env ─────────────────────────────────────────────────────────────────
-echo "─── 3/7  Environment file"
+# ── 3/8  .env ─────────────────────────────────────────────────────────────────
+echo "─── 3/8  Environment file"
 if [[ ! -f "$KRONOS_DIR/.env" ]]; then
     cp "$KRONOS_DIR/.env.example" "$KRONOS_DIR/.env"
     echo "  ✓ .env created from .env.example"
@@ -67,8 +67,8 @@ else
     echo "  ✓ .env already exists (not overwritten)"
 fi
 
-# ── 4/7  Python virtual environment ───────────────────────────────────────────
-echo "─── 4/7  Python virtual environment"
+# ── 4/8  Python virtual environment ───────────────────────────────────────────
+echo "─── 4/8  Python virtual environment"
 if [[ ! -d "$VENV" ]]; then
     python3 -m venv "$VENV"
     echo "  ✓ venv created at .venv/"
@@ -77,8 +77,8 @@ else
 fi
 "$VENV/bin/pip" install --quiet --upgrade pip setuptools wheel
 
-# ── 5/7  PyTorch ──────────────────────────────────────────────────────────────
-echo "─── 5/7  PyTorch"
+# ── 5/8  PyTorch ──────────────────────────────────────────────────────────────
+echo "─── 5/8  PyTorch"
 if [[ "$USE_CUDA" == "true" ]]; then
     # CUDA 12.1 — compatible with MX150/MX230/MX250/MX330 (Pascal/Turing)
     # Requires: sudo apt install nvidia-driver-535 (reboot, then rerun with --cuda)
@@ -91,13 +91,35 @@ fi
 "$VENV/bin/pip" install --quiet torch torchvision --index-url "$TORCH_INDEX"
 echo "  ✓ torch installed"
 
-# ── 6/7  Python dependencies ──────────────────────────────────────────────────
-echo "─── 6/7  Python dependencies"
+# ── 6/8  Python dependencies ──────────────────────────────────────────────────
+echo "─── 6/8  Python dependencies"
 "$VENV/bin/pip" install --quiet -r "$KRONOS_DIR/requirements.txt"
 echo "  ✓ all packages installed"
 
-# ── 7/7  Supervisor ───────────────────────────────────────────────────────────
-echo "─── 7/7  Supervisor"
+# ── 7/8  Upstream Kronos model (vendor/kronos) ────────────────────────────────
+# M13–M16 foundation model generators import from vendor/kronos at startup.
+# Without this directory they silently disable themselves and produce no signals.
+echo "─── 7/8  Upstream Kronos model"
+KRONOS_UPSTREAM="https://github.com/shiyu-coder/Kronos.git"
+for SUBDIR in vendor/kronos Kronos; do
+    TARGET="$KRONOS_DIR/$SUBDIR"
+    if [[ -d "$TARGET/.git" ]]; then
+        echo "  ✓ $SUBDIR already cloned — pulling latest..."
+        git -C "$TARGET" pull --ff-only || true
+    else
+        echo "  Cloning upstream Kronos model into $SUBDIR..."
+        mkdir -p "$(dirname "$TARGET")"
+        git clone "$KRONOS_UPSTREAM" "$TARGET"
+    fi
+done
+if [[ -f "$KRONOS_DIR/vendor/kronos/requirements.txt" ]]; then
+    "$VENV/bin/pip" install --quiet -r "$KRONOS_DIR/vendor/kronos/requirements.txt"
+    echo "  ✓ vendor/kronos requirements installed"
+fi
+echo "  ✓ upstream Kronos model ready"
+
+# ── 8/8  Supervisor ───────────────────────────────────────────────────────────
+echo "─── 8/8  Supervisor"
 chmod +x "$KRONOS_DIR/run_module.sh"
 
 # Inject absolute paths into the template → /etc/supervisor/conf.d/kronos.conf
