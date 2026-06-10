@@ -232,19 +232,23 @@ class MiniGenerator:
                 return None
 
             # ── Sample-distribution confidence ────────────────────────────────
-            # predict_samples() returns (SAMPLE_COUNT, PRED_LEN, 6_features).
+            # predict() averages samples internally; call once per sample to
+            # preserve the distribution. Shape: (SAMPLE_COUNT, PRED_LEN, 6).
             # Column order: open, high, low, close, volume, amount → close = idx 3.
             _CLOSE_IDX = 3
-            raw_samples = self._predictor.predict_samples(
-                df=ohlcv_df,
-                x_timestamp=x_timestamp,
-                y_timestamp=y_timestamp,
-                pred_len=PRED_LEN,
-                T=1.0,
-                top_p=0.9,
-                sample_count=SAMPLE_COUNT,
-                verbose=False,
-            )  # (SAMPLE_COUNT, PRED_LEN, 6)
+            raw_samples = np.stack([
+                self._predictor.predict(
+                    df=ohlcv_df,
+                    x_timestamp=x_timestamp,
+                    y_timestamp=y_timestamp,
+                    pred_len=PRED_LEN,
+                    T=1.0,
+                    top_p=0.9,
+                    sample_count=1,
+                    verbose=False,
+                ).values
+                for _ in range(SAMPLE_COUNT)
+            ], axis=0)  # (SAMPLE_COUNT, PRED_LEN, 6)
 
             sample_finals = raw_samples[:, -1, _CLOSE_IDX]   # final close per sample
             if len(sample_finals) == 0:

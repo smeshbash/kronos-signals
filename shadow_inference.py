@@ -234,22 +234,26 @@ class ShadowInference:
             x_timestamp = pd.Series(pd.to_datetime(ts_unix,   unit='s', utc=True))
             y_timestamp = pd.Series(pd.to_datetime(future_ts, unit='s', utc=True))
 
-            # predict_samples: (sample_count, PRED_LEN, 6) — close is column 3
+            # predict() averages samples internally; call once per sample to
+            # preserve the distribution. Shape: (sample_count, PRED_LEN, 6).
             _CLOSE_IDX  = 3
-            raw_samples = predictor.predict_samples(
-                df=ohlcv_df,
-                x_timestamp=x_timestamp,
-                y_timestamp=y_timestamp,
-                pred_len=PRED_LEN,
-                T=1.0,
-                top_p=0.9,
-                sample_count=_SAMPLE_COUNT,
-                verbose=False,
-            )
+            raw_samples = np.stack([
+                predictor.predict(
+                    df=ohlcv_df,
+                    x_timestamp=x_timestamp,
+                    y_timestamp=y_timestamp,
+                    pred_len=PRED_LEN,
+                    T=1.0,
+                    top_p=0.9,
+                    sample_count=1,
+                    verbose=False,
+                ).values
+                for _ in range(_SAMPLE_COUNT)
+            ], axis=0)  # (_SAMPLE_COUNT, PRED_LEN, 6)
         except Exception as exc:
             log_event(MODULE, 'error', 'error',
-                      f'{model_name} predict_samples() failed: {exc}')
-            logger.exception('%s predict_samples failed', model_name)
+                      f'{model_name} predict() failed: {exc}')
+            logger.exception('%s predict failed', model_name)
             return None
 
         return self._extract_signal(raw_samples, rows)
