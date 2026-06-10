@@ -1069,13 +1069,15 @@ class RiskCheck:
         Applied in both paper and live mode so v5 data accumulates under the
         same filter conditions used in live trading.
 
-        LONGS — allowed only when synthetic daily is bullish (2026-06-10).
+        LONGS — two-gate filter, mirrors shorts (2026-06-10).
           Historical suspension reason: 18 signals, WR=27.8%, EV=-Rs357/trade.
           15/18 longs fired against daily downtrend (structural model bias).
           Zero historical longs fired with bullish daily alignment, so the
           suspension penalised a slice with no negative evidence. Longs are
-          now gated by daily direction: bullish daily → approved; neutral or
-          bearish daily → suspended (counter-trend bias intact).
+          now gated by both daily direction and volume:
+          (1) Daily gate: bullish daily (last 24H) → proceed; neutral/bearish → block.
+          (2) RVOL 0.75x–1.50x gate: same band proven on shorts (WR=95%, n=20).
+              Fail open (None) if RVOL unavailable — never block on missing data.
 
         SHORTS — two-gate filter:
           (1) RVOL 0.75x–1.50x gate (primary):
@@ -1093,16 +1095,23 @@ class RiskCheck:
         if model_source != 'kronos-base-4h':
             return None
 
-        # ── Longs: approved only when synthetic daily is bullish ──────────────
+        # ── Longs: bullish daily + RVOL in band ──────────────────────────────
         if direction == 'long':
             daily_state = RiskCheck._get_synthetic_daily_state(symbol)
-            if daily_state == 'bullish':
-                return None   # APPROVED: long with-trend on bullish daily
-            return (
-                f'kronos_base_4h_long_daily_not_bullish: '
-                f'{symbol} synthetic daily (last 24H) is {daily_state} — '
-                f'long suppressed unless daily is bullish. (2026-06-10)'
-            )
+            if daily_state != 'bullish':
+                return (
+                    f'kronos_base_4h_long_daily_not_bullish: '
+                    f'{symbol} synthetic daily (last 24H) is {daily_state} — '
+                    f'long suppressed unless daily is bullish. (2026-06-10)'
+                )
+            rvol = RiskCheck._get_4h_rvol(symbol)
+            if rvol is not None and not (0.75 <= rvol <= 1.50):
+                return (
+                    f'kronos_base_4h_long_rvol_gate: '
+                    f'RVOL={rvol:.2f}x outside 0.75–1.50x band. '
+                    f'<0.75x=noise candle, >1.50x=extended move. (2026-06-10)'
+                )
+            return None   # APPROVED: bullish daily + RVOL confirmed (or no data)
 
         # ── Shorts: RVOL 0.75x–1.50x gate ───────────────────────────────────
         rvol = RiskCheck._get_4h_rvol(symbol)
