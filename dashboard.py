@@ -822,8 +822,8 @@ def get_data(f: dict) -> dict:
     _gh_reasons: dict = defaultdict(list)
     for _r in _gh_rr_raw:
         _gh_reasons[_r['model']].append((_r['rejection_reason'] or '', int(_r['cnt'])))
-    _gh_logs = {db_key: _read_gen_log(log_path)
-                for db_key, _, _, _, _, log_path in _GH_MODELS}
+    _gh_logs = {db_key: _read_gen_log(log_path, cycle_secs)
+                for db_key, _, cycle_secs, _, _, log_path in _GH_MODELS}
     gen_health = {
         'now_ts':     _gh_ts,
         'mh_24h':     _gh_24h,
@@ -1371,19 +1371,20 @@ _GH_REASON_MAP = [
 ]
 
 
-def _read_gen_log(log_path: str) -> dict:
+def _read_gen_log(log_path: str, cycle_secs: int = 3600) -> dict:
     """Read last 10 KB of a generator .err log and extract operational state.
 
     Returns a dict with keys:
-      loaded      bool   — model loaded line found after most-recent process start
-      scheduled   bool   — scheduler-started line found after most-recent start
-      last_job_ts float  — unix ts of most-recent 'executed successfully' line, or None
-      job_running bool   — 'Running job' seen after most-recent 'executed successfully'
-      not_ready   bool   — 'not ready — skipping' seen (model load failed, cycling no-ops)
-      error_line  str    — first error/traceback line found, or ''
-      log_ok      bool   — False only if file unreadable
+      loaded        bool   — model loaded line found AND timestamp is recent (< 3 cycles old)
+      loaded_ts     float  — unix ts of the most-recent 'loaded' line, or None
+      scheduled     bool   — scheduler-started line found after loaded line
+      last_job_ts   float  — unix ts of most-recent 'executed successfully' line, or None
+      job_running   bool   — 'Running job' seen after most-recent 'executed successfully'
+      not_ready     bool   — 'not ready — skipping' seen (model load failed, cycling no-ops)
+      error_line    str    — first error/traceback line found, or ''
+      log_ok        bool   — False only if file unreadable
     """
-    result = dict(loaded=False, scheduled=False, last_job_ts=None,
+    result = dict(loaded=False, loaded_ts=None, scheduled=False, last_job_ts=None,
                   job_running=False, not_ready=False, error_line='', log_ok=True)
     try:
         with open(log_path, 'rb') as _f:
@@ -1394,20 +1395,32 @@ def _read_gen_log(log_path: str) -> dict:
         result['log_ok'] = False
         return result
 
-    # Find the most-recent process-start boundary (supervisord truncates nothing —
-    # successive starts just append, so we find the last "scheduler started" cluster).
-    # We scan bottom-up so the most-recent info wins.
-    found_start = False
+    now = time.time()
+    stale_threshold = 3 * cycle_secs  # log confirmation older than 3 cycles is from a previous run
+
+    # Scan bottom-up to find the most-recent loaded + scheduler pair.
+    # Extract the timestamp from the line to guard against stale lines from old runs.
+    _loaded_ts = None
+    _scheduled_after_load = False
     for line in reversed(lines):
         ll = line.lower()
-        if 'loaded — context=' in ll or 'model ready' in ll or 'model loaded' in ll:
-            result['loaded'] = True
-            found_start = True
-        if 'scheduler started' in ll:
-            result['scheduled'] = True
-            found_start = True
-        if found_start and result['loaded'] and result['scheduled']:
-            break  # have what we need from the most-recent start
+        if ('loaded — context=' in ll or 'model ready' in ll or 'model loaded' in ll) and _loaded_ts is None:
+            try:
+                _loaded_ts = time.mktime(time.strptime(line[:19], '%Y-%m-%d %H:%M:%S'))
+            except Exception:
+                _loaded_ts = 0.0  # unparseable but present
+        if 'scheduler started' in ll and _loaded_ts is not None:
+            _scheduled_after_load = True
+        if _loaded_ts is not None and _scheduled_after_load:
+            break
+
+    if _loaded_ts is not None and (now - _loaded_ts) <= stale_threshold:
+        result['loaded']    = True
+        result['loaded_ts'] = _loaded_ts
+        result['scheduled'] = _scheduled_after_load
+    elif _loaded_ts is not None:
+        # Loaded line exists but is stale — previous process run, not current
+        result['loaded_ts'] = _loaded_ts  # keep ts so we can show "last loaded Xh ago"
 
     for line in reversed(lines):
         ll = line.lower()
@@ -1471,6 +1484,7 @@ def _render_gen_health(d: dict) -> str:
 
         log_ok      = log.get('log_ok', False)
         loaded      = log.get('loaded', False)
+        loaded_ts   = log.get('loaded_ts')
         scheduled   = log.get('scheduled', False)
         not_ready   = log.get('not_ready', False)
         error_line  = log.get('error_line', '')
@@ -1555,9 +1569,12 @@ def _render_gen_health(d: dict) -> str:
                                   f'{job_info}</div>')
                 else:
                     st, sc, bc = 'SILENT', '#ff5630', '#ff5630'
-                    why = ('never generated a signal — model may still be loading'
-                           if last_ts is None
-                           else f'last signal {_age(last_ts)} — may have crashed')
+                    if loaded_ts:
+                        why = f'Log shows model loaded {_age(loaded_ts)} — that was a previous run. Current process has not confirmed ready.'
+                    elif last_ts:
+                        why = f'Last signal {_age(last_ts)} — current process has not loaded yet'
+                    else:
+                        why = 'No signals ever — model still loading or failed to start'
                     detail = f'<div class="mh-detail" style="color:#ff5630">{why}</div>'
 
         dot = '⊘' if code_disabled else '●'
