@@ -60,7 +60,7 @@ TIMEFRAME     = '1h'
 PRED_LEN      = 6          # 6 × 1H = 6H horizon
 HORIZON       = '6h'
 ATR_PERIOD    = 14
-SAMPLE_COUNT  = int(os.environ.get('KRONOS_SHADOW_SAMPLE_COUNT', '75'))
+SAMPLE_COUNT  = int(os.environ.get('KRONOS_SHADOW_SAMPLE_COUNT', '100'))
 
 CONTEXT_LEN = int(os.environ.get('KRONOS_MINI_CONTEXT', '2048'))  # full capacity
 
