@@ -1069,12 +1069,13 @@ class RiskCheck:
         Applied in both paper and live mode so v5 data accumulates under the
         same filter conditions used in live trading.
 
-        LONGS — suspended entirely.
-          Reason: 18 historical signals. WR=27.8%, EV=-Rs 357/trade.
-          15/18 longs fired against daily downtrend (structural model bias) —
-          SMA-42 above (7-day downtrend): n=18, all 18 longs. Zero fired with
-          bullish daily alignment or volume confirmation. No filter rescues them.
-          Reinstate when model retrained.
+        LONGS — allowed only when synthetic daily is bullish (2026-06-10).
+          Historical suspension reason: 18 signals, WR=27.8%, EV=-Rs357/trade.
+          15/18 longs fired against daily downtrend (structural model bias).
+          Zero historical longs fired with bullish daily alignment, so the
+          suspension penalised a slice with no negative evidence. Longs are
+          now gated by daily direction: bullish daily → approved; neutral or
+          bearish daily → suspended (counter-trend bias intact).
 
         SHORTS — two-gate filter:
           (1) RVOL 0.75x–1.50x gate (primary):
@@ -1092,13 +1093,15 @@ class RiskCheck:
         if model_source != 'kronos-base-4h':
             return None
 
-        # ── Longs: suspended ─────────────────────────────────────────────────
+        # ── Longs: approved only when synthetic daily is bullish ──────────────
         if direction == 'long':
+            daily_state = RiskCheck._get_synthetic_daily_state(symbol)
+            if daily_state == 'bullish':
+                return None   # APPROVED: long with-trend on bullish daily
             return (
-                'kronos_base_4h_longs_suspended: '
-                'WR=27.8% EV=-Rs357/trade on 18 historical signals; '
-                '15/18 longs fired against daily downtrend, zero with bullish alignment. '
-                'Reinstate when model retrained. (2026-06-09)'
+                f'kronos_base_4h_long_daily_not_bullish: '
+                f'{symbol} synthetic daily (last 24H) is {daily_state} — '
+                f'long suppressed unless daily is bullish. (2026-06-10)'
             )
 
         # ── Shorts: RVOL 0.75x–1.50x gate ───────────────────────────────────
