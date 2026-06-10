@@ -1476,6 +1476,7 @@ def _render_gen_health(d: dict) -> str:
         error_line  = log.get('error_line', '')
         last_job_ts = log.get('last_job_ts')
         job_running = log.get('job_running', False)
+        stale_secs  = 2.5 * cycle_secs
 
         # ── Determine status ────────────────────────────────────────────────────
         if code_disabled:
