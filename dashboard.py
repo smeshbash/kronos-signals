@@ -1526,20 +1526,33 @@ def _render_gen_health(d: dict) -> str:
                           f'<div class="mh-reasons">{pills}</div>')
 
             else:
-                # Stale or no recent signals — model alive but idle
+                # Stale or no recent signals — model alive per log, but not writing to DB
                 job_info = ''
                 if last_job_ts:
-                    job_info = f' &mdash; last job {_age(last_job_ts)}'
+                    job_info = f' &mdash; last job ran {_age(last_job_ts)}'
                 elif job_running:
                     job_info = ' &mdash; job currently running'
+
                 if loaded and scheduled:
-                    st, sc, bc = 'WAITING', '#36b37e', '#36b37e'
-                    last_info = (f' &mdash; last signal {_age(last_ts)}'
-                                 if last_ts and not stale else '')
-                    # Show any rejection breakdown from older signals if present
-                    pills_section = f'<div class="mh-reasons">{pills}</div>' if pills else ''
-                    detail = (f'<div class="mh-detail">Model loaded &amp; scheduler active'
-                              f'{job_info}{last_info}</div>{pills_section}')
+                    # Calculate missed cycles
+                    if last_ts:
+                        missed = int((now_ts - last_ts) // cycle_secs)
+                        idle_str = f'no signals for {_age(last_ts)} ({missed} cycles)'
+                    else:
+                        idle_str = 'no signals ever written to DB'
+
+                    # If multiple cycles missed, escalate to IDLE (yellow) — something is wrong
+                    cycles_missed = int((now_ts - (last_ts or (now_ts - stale_secs))) // cycle_secs)
+                    if cycles_missed >= 3:
+                        st, sc, bc = 'IDLE', '#ff991f', '#ff991f'
+                        pills_section = f'<div class="mh-reasons">{pills}</div>' if pills else ''
+                        detail = (f'<div class="mh-detail" style="color:#ff991f">'
+                                  f'Loaded &amp; scheduling but {idle_str}{job_info}'
+                                  f' — generator not writing signals</div>{pills_section}')
+                    else:
+                        st, sc, bc = 'WAITING', '#36b37e', '#36b37e'
+                        detail = (f'<div class="mh-detail">Model loaded &amp; scheduler active'
+                                  f'{job_info}</div>')
                 else:
                     st, sc, bc = 'SILENT', '#ff5630', '#ff5630'
                     why = ('never generated a signal — model may still be loading'
