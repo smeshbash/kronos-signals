@@ -143,8 +143,6 @@ def _parse_horizon_secs(horizon: str) -> int:
     return 0
 
 def _maturity(signal_ts, horizon, status: str) -> str:
-    if str(status).lower() in ('rejected', 'expired'):
-        return '<span style="color:#97a0af">—</span>'
     try:
         hz_secs  = _parse_horizon_secs(str(horizon or ''))
         if hz_secs == 0:
@@ -492,8 +490,8 @@ def get_data(f: dict) -> dict:
     sw, sp = _signal_where(f)
     pipeline = _q(f"""
         SELECT id, symbol, direction, confidence, horizon, status,
-               rejection_reason, predicted_return_pct, signal_timestamp,
-               quality_flag, model_source
+               rejection_reason, predicted_return_pct, actual_return_pct,
+               signal_timestamp, quality_flag, model_source
         FROM signals
         WHERE 1=1 {sw}
         ORDER BY signal_timestamp DESC LIMIT 50
@@ -740,6 +738,44 @@ def get_data(f: dict) -> dict:
                        for o in ['correct', 'wrong', 'unresolved']),
     }
 
+    # 6c. Weekly directional accuracy trend — last 12 weeks, all resolved signals.
+    # Applies model/direction/regime filters from the filter bar but uses a fixed
+    # 12-week window so the trend is always visible regardless of the Period selector.
+    _wt_parts  = ['actual_return_pct IS NOT NULL', 'quality_flag IS NULL',
+                  f'signal_timestamp >= {int(time.time()) - 84 * 86400}']
+    _wt_params = []
+    if f.get('models'):
+        ph = ','.join('?' * len(f['models']))
+        _wt_parts.append(f"COALESCE(model_source,'custom') IN ({ph})")
+        _wt_params.extend(f['models'])
+    if f.get('direction') and f['direction'] not in ('both', ''):
+        _wt_parts.append('direction = ?')
+        _wt_params.append(f['direction'])
+    _wt_regime = f.get('regime', 5)
+    if _wt_regime and _wt_regime > 0:
+        _wt_parts.append('COALESCE(regime_version, 1) = ?')
+        _wt_params.append(_wt_regime)
+    _wt_where = ' AND '.join(_wt_parts)
+    _wt_raw = _q(f"""
+        SELECT strftime('%Y-W%W', datetime(signal_timestamp, 'unixepoch')) AS week,
+               COALESCE(model_source,'custom') AS ms,
+               direction,
+               SUM(CASE WHEN (direction='long'  AND actual_return_pct >  {_HIT_THR})
+                            OR (direction='short' AND actual_return_pct < -{_HIT_THR})
+                        THEN 1 ELSE 0 END) AS correct,
+               COUNT(*) AS total
+        FROM signals
+        WHERE {_wt_where}
+        GROUP BY week, ms, direction
+        ORDER BY week ASC
+    """, _wt_params)
+    _wt_pivot: dict = defaultdict(dict)
+    for _r in _wt_raw:
+        _wt_pivot[_r['week']][(_r['ms'], _r['direction'])] = {
+            'c': int(_r['correct']), 't': int(_r['total'])
+        }
+    weekly_trend = dict(_wt_pivot)
+
     # 7. Events log (last 30)
     events_log = _q("""
         SELECT created_at, event_type, message
@@ -775,6 +811,7 @@ def get_data(f: dict) -> dict:
         has_next_sig=has_next_sig,
         has_prev_sig=(f.get('sigpage', 0) > 0),
         sig_stats=sig_stats,
+        weekly_trend=weekly_trend,
         events_log=events_log,
         activity=activity,
         ts=int(time.time()),
@@ -1346,11 +1383,11 @@ def _render_summary_pane(d: dict, f: dict, notice: str) -> str:
   <td>{_model(p.get('model_source') or 'custom')}</td>
   <td style="font-size:.82rem"><strong>{sz:,.6f}</strong><br>
     <span class="tag">&#8377;{notl:,.0f}</span></td>
-  <td>&#8377;{ep:,.2f}</td><td>&#8377;{cp:,.2f}</td>
+  <td>${ep:,.2f}</td><td>${cp:,.2f}</td>
   <td class="{_gain(upnl)}">{_inr(upnl)}<br><span class="tag">({_pct(upct)})</span></td>
-  <td class="pos" style="font-size:.8rem">&#8377;{rh:,.2f}<br><span class="tag">{_pct(pk_pct)}</span></td>
-  <td class="neg" style="font-size:.8rem">&#8377;{rl:,.2f}<br><span class="tag">{_pct(tr_pct)}</span></td>
-  <td class="tag" style="font-size:.75rem">SL &#8377;{sl:,.2f}<br>TP &#8377;{tp_:,.2f}</td>
+  <td class="pos" style="font-size:.8rem">${rh:,.2f}<br><span class="tag">{_pct(pk_pct)}</span></td>
+  <td class="neg" style="font-size:.8rem">${rl:,.2f}<br><span class="tag">{_pct(tr_pct)}</span></td>
+  <td class="tag" style="font-size:.75rem">SL ${sl:,.2f}<br>TP ${tp_:,.2f}</td>
   <td class="neu">{_elapsed(p['entry_timestamp'])}</td>
   <td class="tag">{_ts(p['max_hold_until'])}</td>
 </tr>"""
@@ -1383,9 +1420,9 @@ def _render_summary_pane(d: dict, f: dict, notice: str) -> str:
             pk     = t.get('peak_price')
             tr_    = t.get('trough_price')
 
-            pk_cell = (f'&#8377;{_f(pk):,.2f}<br><span class="tag">{_pct((_f(pk)-ep)/ep*100)}</span>'
+            pk_cell = (f'${_f(pk):,.2f}<br><span class="tag">{_pct((_f(pk)-ep)/ep*100)}</span>'
                        if pk and ep else '<span class="neu">--</span>')
-            tr_cell = (f'&#8377;{_f(tr_):,.2f}<br><span class="tag">{_pct((_f(tr_)-ep)/ep*100)}</span>'
+            tr_cell = (f'${_f(tr_):,.2f}<br><span class="tag">{_pct((_f(tr_)-ep)/ep*100)}</span>'
                        if tr_ and ep else '<span class="neu">--</span>')
 
             conf_str = f'{float(conf):.3f}' if conf is not None else '--'
@@ -1410,7 +1447,7 @@ def _render_summary_pane(d: dict, f: dict, notice: str) -> str:
   <td>{_dir(t['direction'])}</td>
   <td>{_model(t.get('model_source') or 'custom')}</td>
   <td style="font-size:.82rem"><strong>{sz:,.6f}</strong></td>
-  <td class="tag">&#8377;{ep:,.2f} &rarr; &#8377;{xp:,.2f}</td>
+  <td class="tag">${ep:,.2f} &rarr; ${xp:,.2f}</td>
   <td class="{_gain(g)}">{_inr(g)}</td>
   <td class="pos" style="font-size:.8rem">{pk_cell}</td>
   <td class="neg" style="font-size:.8rem">{tr_cell}</td>
@@ -1445,7 +1482,65 @@ def _render_summary_pane(d: dict, f: dict, notice: str) -> str:
                      f'{hist_sfx}</div>'
                      f'<div class="empty">No closed trades match the current filters.</div></div>')
 
-    return notice + quality_notice + cards + pos_html + hist_html
+    # Recent signal activity — last 15 signals regardless of status
+    recent_sigs = d.get('pipeline', [])[:15]
+    if recent_sigs:
+        sig_rows = ''
+        for s in recent_sigs:
+            status    = str(s.get('status') or '').lower()
+            direction = str(s.get('direction') or '').lower()
+            actual    = s.get('actual_return_pct')
+            pred      = _f(s.get('predicted_return_pct'))
+            reason    = str(s.get('rejection_reason') or '')
+            reason_short = reason.replace('_', ' ')
+            if len(reason_short) > 45: reason_short = reason_short[:42] + '...'
+            if actual is not None:
+                actual_f = float(actual)
+                hit      = ((direction == 'long'  and actual_f >  _HIT_THR) or
+                            (direction == 'short' and actual_f < -_HIT_THR))
+                icon     = '&#10003;' if hit else '&#10007;'
+                cls_     = 'outcome-hit' if hit else 'outcome-miss'
+                actual_cell = f'<span class="{cls_}">{_pct(actual_f)}&thinsp;{icon}</span>'
+            elif status in ('rejected', 'expired'):
+                actual_cell = '<span class="neu">—</span>'
+            else:
+                actual_cell = '<span class="neu" style="font-size:.7rem">pending</span>'
+            opacity = ' style="opacity:.45"' if status in ('rejected', 'expired') else ''
+            sig_rows += f"""<tr{opacity}>
+  <td class="tag">{_ts(s['signal_timestamp'])}</td>
+  <td><strong>{s['symbol']}</strong></td>
+  <td>{_model(s.get('model_source') or 'custom')}</td>
+  <td>{_dir(direction)}</td>
+  <td class="{_gain(pred)}">{_pct(pred)}</td>
+  <td>{actual_cell}</td>
+  <td>{_status(status)}</td>
+  <td class="tag" style="font-size:.7rem" title="{reason}">{reason_short}</td>
+</tr>"""
+        sig_link = _url_with({**f, 'tab': 'signals'})
+        recent_html = f"""
+<div class="section">
+  <div class="section-hdr">Recent Signal Activity
+    <span class="tag" style="text-transform:none;font-weight:400;font-size:.67rem">
+      last {len(recent_sigs)} &nbsp;·&nbsp;
+      <span style="color:#97a0af">dimmed = rejected/expired</span>
+    </span>
+    <a href="{sig_link}" style="margin-left:auto;font-size:.72rem;color:#0052cc;
+       text-decoration:none;font-weight:600">View all &rarr;</a>
+  </div>
+  <div style="overflow-x:auto"><table>
+    <thead><tr><th>Time (UTC)</th><th>Symbol</th><th>Model</th><th>Dir</th>
+    <th>Predicted</th><th>Actual</th><th>Status</th><th>Rejection Reason</th></tr></thead>
+    <tbody>{sig_rows}</tbody></table></div>
+</div>"""
+    else:
+        recent_html = (
+            '<div class="section"><div class="section-hdr">Recent Signal Activity</div>'
+            '<div class="empty">No signals generated yet — generators may still be loading models '
+            'or market conditions are blocking all directions (bullish market with longs suspended).'
+            '</div></div>'
+        )
+
+    return notice + quality_notice + cards + pos_html + hist_html + recent_html
 
 
 # ── Tab 2: Analysis pane ──────────────────────────────────────────────────────
@@ -1633,6 +1728,72 @@ def _render_analysis_pane(d: dict, f: dict) -> str:
     return matrix_html + two_col + cal_html
 
 
+# ── Weekly trend table ────────────────────────────────────────────────────────
+
+def _render_weekly_trend(weekly_trend: dict) -> str:
+    if not weekly_trend:
+        return ('<div class="section"><div class="section-hdr">Weekly Directional Accuracy</div>'
+                '<div class="empty">No resolved signals yet — trend will appear once signals '
+                'mature past their horizon.</div></div>')
+
+    all_md: set = set()
+    for wk_data in weekly_trend.values():
+        all_md.update(wk_data.keys())
+
+    model_order = [mk for mk, *_ in _MODEL_OPTS]
+    cols = [(mk, drx) for mk in model_order for drx in ('long', 'short')
+            if (mk, drx) in all_md]
+    if not cols:
+        return ''
+
+    _mlbl = {mk: lbl for mk, lbl, *_ in _MODEL_OPTS}
+    hdr   = '<th>Week</th>'
+    for mk, drx in cols:
+        arrow = '&#9650;&nbsp;Long' if drx == 'long' else '&#9660;&nbsp;Short'
+        color = '#006644' if drx == 'long' else '#bf2600'
+        hdr  += (f'<th style="text-align:center;min-width:80px">'
+                 f'{_mlbl.get(mk, mk)}<br>'
+                 f'<span style="font-size:.63rem;color:{color};font-weight:600">{arrow}</span></th>')
+
+    rows  = ''
+    for wk in reversed(sorted(weekly_trend.keys())):
+        wk_data = weekly_trend[wk]
+        rows += f'<tr><td class="tag" style="white-space:nowrap;font-family:monospace">{wk}</td>'
+        for mk, drx in cols:
+            v = wk_data.get((mk, drx), {'c': 0, 't': 0})
+            c, t = v['c'], v['t']
+            if t == 0:
+                rows += '<td style="text-align:center;color:#97a0af">—</td>'
+            else:
+                pct = c / t * 100
+                if pct >= 55:
+                    bg, fg = '#e3fcef', '#006644'
+                elif pct >= 45:
+                    bg, fg = '#fffae6', '#7a5200'
+                else:
+                    bg, fg = '#ffebe6', '#bf2600'
+                rows += (f'<td style="text-align:center;background:{bg};padding:6px 4px">'
+                         f'<span style="font-weight:700;color:{fg}">{pct:.0f}%</span>'
+                         f'<br><span style="font-size:.63rem;color:#6b778c">n={t}</span></td>')
+        rows += '</tr>'
+
+    return f"""
+<div class="section">
+  <div class="section-hdr">Weekly Directional Accuracy — All Signals
+    <span class="tag" style="text-transform:none;font-weight:400;font-size:.67rem">
+      executed + rejected combined &nbsp;·&nbsp; last 12 weeks &nbsp;·&nbsp;
+      <span style="color:#006644">&#9646;</span>&thinsp;≥55%&nbsp;
+      <span style="color:#7a5200">&#9646;</span>&thinsp;45–55%&nbsp;
+      <span style="color:#bf2600">&#9646;</span>&thinsp;&lt;45%
+    </span>
+  </div>
+  <div style="overflow-x:auto"><table>
+    <thead><tr>{hdr}</tr></thead>
+    <tbody>{rows}</tbody>
+  </table></div>
+</div>"""
+
+
 # ── Tab 3: Signals explorer ───────────────────────────────────────────────────
 
 def _render_signals_pane(d: dict, f: dict, notice: str) -> str:
@@ -1817,7 +1978,8 @@ def _render_signals_pane(d: dict, f: dict, notice: str) -> str:
         tbl = ('<div class="section"><div class="section-hdr">Signal Explorer'
                f'{sfx}</div><div class="empty">No signals match the current filters.</div></div>')
 
-    return notice + tbl
+    weekly_html = _render_weekly_trend(d.get('weekly_trend', {}))
+    return notice + weekly_html + tbl
 
 
 # ── Tab 4: Operational pane ───────────────────────────────────────────────────
@@ -1870,8 +2032,10 @@ def _render_ops_pane(d: dict, f: dict, notice: str) -> str:
     if d['pipeline']:
         rows = ''
         for s in d['pipeline']:
-            ret    = _f(s.get('predicted_return_pct'))
-            reason = str(s.get('rejection_reason') or '').replace('_', ' ')
+            ret       = _f(s.get('predicted_return_pct'))
+            actual    = s.get('actual_return_pct')
+            direction = str(s.get('direction') or '').lower()
+            reason    = str(s.get('rejection_reason') or '').replace('_', ' ')
             if len(reason) > 55: reason = reason[:52] + '...'
             qf        = s.get('quality_flag')
             qf_badge  = ('&nbsp;<span class="badge" style="background:#ffebe6;'
@@ -1882,6 +2046,15 @@ def _render_ops_pane(d: dict, f: dict, notice: str) -> str:
             src_badge = (f'<span class="badge" style="background:{_src_bg.get(src,"#f4f5f7")};'
                          f'color:#172b4d;font-size:.65rem">{src_lbl}</span>')
             mat = _maturity(s['signal_timestamp'], s.get('horizon'), s.get('status'))
+            if actual is not None:
+                actual_f = float(actual)
+                hit      = ((direction == 'long'  and actual_f >  _HIT_THR) or
+                            (direction == 'short' and actual_f < -_HIT_THR))
+                icon     = '&#10003;' if hit else '&#10007;'
+                cls_     = 'outcome-hit' if hit else 'outcome-miss'
+                actual_cell = f'<span class="{cls_}">{_pct(actual_f)}&thinsp;{icon}</span>'
+            else:
+                actual_cell = '<span class="neu">—</span>'
             rows += f"""<tr{row_style}>
   <td class="tag">{_ts(s['signal_timestamp'])}</td>
   <td><strong>{s['symbol']}</strong>{qf_badge}</td>
@@ -1889,6 +2062,7 @@ def _render_ops_pane(d: dict, f: dict, notice: str) -> str:
   <td>{_dir(s['direction'])}</td>
   <td>{_f(s['confidence']):.3f}</td>
   <td class="{_gain(ret)}">{_pct(ret)}</td>
+  <td>{actual_cell}</td>
   <td>{_status(s['status'])}</td>
   <td style="font-size:.8rem;white-space:nowrap">{mat}</td>
   <td class="tag" style="font-size:.72rem" title="{s.get('rejection_reason') or ''}">{reason}</td>
@@ -1898,7 +2072,7 @@ def _render_ops_pane(d: dict, f: dict, notice: str) -> str:
   <div class="section-hdr">Signal Pipeline{pipe_sfx} <span class="count">last {len(d['pipeline'])} of 50</span></div>
   <div style="overflow-x:auto"><table>
     <thead><tr><th>Time (UTC)</th><th>Symbol</th><th>Model</th><th>Dir</th><th>Conf.</th>
-    <th>Pred. Return</th><th>Status</th><th>Matures In</th><th>Rejection Reason</th></tr></thead>
+    <th>Pred.</th><th>Actual</th><th>Status</th><th>Matures In</th><th>Rejection Reason</th></tr></thead>
     <tbody>{rows}</tbody></table></div>
 </div>"""
     else:
