@@ -49,8 +49,8 @@ echo "  ✓ done"
 
 # ── 2/8  Directories ──────────────────────────────────────────────────────────
 echo "─── 2/8  Directories"
-mkdir -p "$KRONOS_DIR/data" "$KRONOS_DIR/models" "$LOG_DIR"
-echo "  ✓ data/  models/  logs/"
+mkdir -p "$KRONOS_DIR/data" "$KRONOS_DIR/models" "$LOG_DIR" "$KRONOS_DIR/.cache/huggingface"
+echo "  ✓ data/  models/  logs/  .cache/huggingface/"
 
 # ── 3/8  .env ─────────────────────────────────────────────────────────────────
 echo "─── 3/8  Environment file"
@@ -118,8 +118,31 @@ if [[ -f "$KRONOS_DIR/vendor/kronos/requirements.txt" ]]; then
 fi
 echo "  ✓ upstream Kronos model ready"
 
-# ── 8/8  Supervisor ───────────────────────────────────────────────────────────
-echo "─── 8/8  Supervisor"
+# ── 8/9  HuggingFace foundation model weights ─────────────────────────────────
+# M13/M15 use NeoQuasar/Kronos-mini (~500 MB); M14/M16 use NeoQuasar/Kronos-base (~500 MB).
+# Downloaded into .cache/huggingface/ so supervisor (running as current user) can access them.
+# HF_HUB_DISABLE_IMPLICIT_TOKEN avoids PermissionError if a root-owned token file exists.
+echo "─── 8/9  HuggingFace foundation model weights"
+export HF_HOME="$KRONOS_DIR/.cache/huggingface"
+export HF_HUB_DISABLE_IMPLICIT_TOKEN=1
+
+for MODEL in NeoQuasar/Kronos-mini NeoQuasar/Kronos-base; do
+    MODEL_SLUG="${MODEL//\//__}"
+    if [[ -d "$HF_HOME/hub/models--${MODEL_SLUG}" ]]; then
+        echo "  ✓ $MODEL already cached"
+    else
+        echo "  Downloading $MODEL from HuggingFace (~500 MB)..."
+        "$VENV/bin/python" -c "
+from huggingface_hub import snapshot_download
+snapshot_download('$MODEL')
+print('  done')
+" || echo "  ⚠  Download failed — generator will retry on first run"
+    fi
+done
+echo "  ✓ HuggingFace model weights ready"
+
+# ── 9/9  Supervisor ───────────────────────────────────────────────────────────
+echo "─── 9/9  Supervisor"
 chmod +x "$KRONOS_DIR/run_module.sh"
 
 # Inject absolute paths into the template → /etc/supervisor/conf.d/kronos.conf
@@ -135,7 +158,7 @@ sudo systemctl enable supervisor --now 2>/dev/null || sudo service supervisor st
 sleep 1
 sudo supervisorctl reread
 sudo supervisorctl update
-echo "  ✓ supervisor config installed and reloaded"
+echo "  ✓ supervisor config installed and reloaded (9/9)"
 
 # ── Summary ────────────────────────────────────────────────────────────────────
 LOCAL_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")

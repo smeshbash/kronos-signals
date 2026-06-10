@@ -141,7 +141,29 @@ chown "$KRONOS_USER:$KRONOS_USER" "$LOG_DIR"
 
 sudo -u "$KRONOS_USER" mkdir -p \
     "$APP_DIR/data/reports" \
-    "$APP_DIR/models"
+    "$APP_DIR/models" \
+    "$APP_DIR/.cache/huggingface"
+
+# ── 7b. Pre-download HuggingFace models as kronos user ───────────────────────
+# M13/M15 use NeoQuasar/Kronos-mini (~500 MB), M14/M16 use NeoQuasar/Kronos-base (~500 MB).
+# Download now so generators start instantly under supervisor instead of timing out on
+# first job tick. HF_HOME points to a kronos-owned directory so root cache is never involved.
+HF_ENV="HF_HOME=$APP_DIR/.cache/huggingface HF_HUB_DISABLE_IMPLICIT_TOKEN=1"
+info "Pre-downloading NeoQuasar/Kronos-mini from HuggingFace (~500 MB)..."
+sudo -u "$KRONOS_USER" env $HF_ENV \
+    "$VENV_DIR/bin/python" -c "
+from huggingface_hub import snapshot_download
+snapshot_download('NeoQuasar/Kronos-mini', local_dir=None)
+print('Kronos-mini download complete')
+" || warn "Kronos-mini download failed — generators will retry on first run"
+
+info "Pre-downloading NeoQuasar/Kronos-base from HuggingFace (~500 MB)..."
+sudo -u "$KRONOS_USER" env $HF_ENV \
+    "$VENV_DIR/bin/python" -c "
+from huggingface_hub import snapshot_download
+snapshot_download('NeoQuasar/Kronos-base', local_dir=None)
+print('Kronos-base download complete')
+" || warn "Kronos-base download failed — generators will retry on first run"
 
 # ── 8. Create .env from template if not present ───────────────────────────────
 if [[ ! -f "$APP_DIR/.env" ]]; then
