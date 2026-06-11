@@ -284,6 +284,80 @@ print(f'  {"above SMA-42 + neutral/bearish daily":<35}  {n:<5}  {wr:<8}  {ev}')
 n, wr, ev = stats(neither)
 print(f'  {"below SMA-42 (blocked regardless)":<35}  {n:<5}  {wr:<8}  {ev}')
 
+# ── 12. Rolling WR gate simulation ───────────────────────────────────────────
+section('12. GATE SIMULATION — rolling WR of last 10 M04 longs < 25% → suppress')
+
+ROLLING_WINDOW  = 10
+ROLLING_WR_GATE = 0.25
+HIT_THR_WR      = 0.15   # same as analysis threshold — any move > 0.15% = win
+
+# Must process in chronological order — gate uses only past resolved signals
+all_rows_chron = sorted(rows, key=lambda r: 0)   # already ordered from DB query
+longs_chron    = [r for r in all_rows_chron if r['direction'] == 'long']
+
+# Walk through longs in time order, maintaining a rolling resolved window
+resolved_window = []   # last N resolved long results (booleans)
+gate_results    = []   # (row, gate_open: bool, wr_at_decision: float|None)
+
+for r in longs_chron:
+    if len(resolved_window) < ROLLING_WINDOW:
+        gate_open = True          # fewer than 10 resolved — fail open
+        wr_now    = None
+    else:
+        wr_now    = sum(resolved_window[-ROLLING_WINDOW:]) / ROLLING_WINDOW
+        gate_open = wr_now >= ROLLING_WR_GATE
+
+    gate_results.append((r, gate_open, wr_now))
+    resolved_window.append(r['correct'])   # add this signal's outcome to history
+
+passed  = [(r, wr) for r, go, wr in gate_results if go]
+blocked = [(r, wr) for r, go, wr in gate_results if not go]
+
+print(f'\n  Rolling window: {ROLLING_WINDOW} signals   Gate threshold: WR < {ROLLING_WR_GATE*100:.0f}%')
+print(f'  Fail-open when fewer than {ROLLING_WINDOW} resolved signals in history\n')
+
+print(f'  Without gate (all longs):')
+n, wr, ev = stats(longs_chron)
+print(f'    n={n}  WR={wr}  EV={ev} Rs/trade  Total PnL={sum(r["pnl"] for r in longs_chron):+.0f}')
+
+print(f'\n  With rolling WR gate (gate open):')
+passed_rows = [r for r, _ in passed]
+n, wr, ev = stats(passed_rows)
+print(f'    n={n}  WR={wr}  EV={ev} Rs/trade  Total PnL={sum(r["pnl"] for r in passed_rows):+.0f}')
+
+print(f'\n  Blocked by gate (WR < {ROLLING_WR_GATE*100:.0f}%):')
+blocked_rows = [r for r, _ in blocked]
+n, wr, ev = stats(blocked_rows)
+print(f'    n={n}  WR={wr}  EV={ev} Rs/trade  Total PnL={sum(r["pnl"] for r in blocked_rows):+.0f}')
+
+pnl_gain = sum(r['pnl'] for r in passed_rows) - sum(r['pnl'] for r in longs_chron)
+print(f'\n  Gate PnL impact: {pnl_gain:+.0f} Rs '
+      f'(positive = gate removes losing trades)')
+
+# Per-regime breakdown under the rolling WR gate
+print(f'\n  Per-regime breakdown:')
+print(f'  {"Regime":<8}  {"Segment":<10}  {"n":<5}  {"WR":<8}  {"EV Rs/trade"}')
+print(f'  {SEP2}')
+for rv in sorted(set(r['regime'] for r in longs_chron)):
+    for label, subset in [
+        ('passed',  [r for r, go, _ in gate_results if go     and r['regime'] == rv]),
+        ('blocked', [r for r, go, _ in gate_results if not go and r['regime'] == rv]),
+    ]:
+        if subset:
+            n, wr, ev = stats(subset)
+            print(f'  v{rv:<7}  {label:<10}  {n:<5}  {wr:<8}  {ev}')
+    print()
+
+# Show gate state transitions (when did it open/close?)
+print(f'  Gate open/close transitions by regime:')
+prev_state = True
+for r, gate_open, wr_now in gate_results:
+    if gate_open != prev_state:
+        state_str = 'OPENED' if gate_open else 'CLOSED'
+        wr_str    = f'rolling WR={wr_now*100:.1f}%' if wr_now is not None else 'insufficient data'
+        print(f'    Gate {state_str} → v{r["regime"]} {r["symbol"]} ({wr_str})')
+        prev_state = gate_open
+
 print(f'\n{SEP}')
 print('  END OF ANALYSIS')
 print(SEP)
