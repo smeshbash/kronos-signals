@@ -157,7 +157,7 @@ MIN_CONFIDENCE_BY_SOURCE: dict = {}
 #   kronos-mini (117 shorts) drives all positive EV in pooled analysis; kronos-base
 #   adds no edge. Signal generator continues running to accumulate v5 data.
 #   Re-evaluate when kronos-base has 50+ resolved short signals in v5.
-DISABLED_MODEL_SOURCES: frozenset = frozenset({'kronos-base'})
+DISABLED_MODEL_SOURCES: frozenset = frozenset({'kronos-base','kronos-mini'})
 
 # A pending signal older than this is expired, not rejected (Section 10.1: 4H entry timeout)
 SIGNAL_EXPIRY_SECONDS = 4 * 3600
