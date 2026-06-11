@@ -61,6 +61,19 @@ apt-get install -y -qq \
 
 info "Python version: $(python3 --version)"
 
+# ── 1b. cloudflared ───────────────────────────────────────────────────────────
+info "Installing cloudflared..."
+if ! command -v cloudflared &>/dev/null; then
+    ARCH=$(dpkg --print-architecture)
+    curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH}.deb" \
+        -o /tmp/cloudflared.deb
+    dpkg -i /tmp/cloudflared.deb
+    rm -f /tmp/cloudflared.deb
+    info "cloudflared installed"
+else
+    info "cloudflared already installed ($(cloudflared --version 2>&1 | head -1))"
+fi
+
 # ── 2. Create kronos system user ──────────────────────────────────────────────
 if ! id "$KRONOS_USER" &>/dev/null; then
     info "Creating user '$KRONOS_USER'..."
