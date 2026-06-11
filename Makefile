@@ -4,7 +4,7 @@
 
 .PHONY: help start stop restart status logs update install \
         tail-data tail-risk tail-dashboard tail-exec tail-pos \
-        tail-m13 tail-m14 tail-m15 tail-m16
+        tail-m13 tail-m14 tail-m15 tail-m16 tail-tunnel tunnel-url
 
 GROUP := kronos
 
@@ -29,6 +29,8 @@ help:
 	@echo "    make tail-m15    tail M15 mini-4H generator"
 	@echo "    make tail-m16    tail M16 base-4H generator (benchmark)"
 	@echo "    make tail-dashboard  tail M12 dashboard"
+	@echo "    make tail-tunnel     tail Cloudflare tunnel log"
+	@echo "    make tunnel-url      print the active tunnel URL"
 	@echo ""
 	@echo "  Maintenance:"
 	@echo "    make update      git pull + restart all"
@@ -86,3 +88,9 @@ tail-m16:
 
 tail-dashboard:
 	tail -f logs/m12_dashboard.log
+
+tail-tunnel:
+	tail -f logs/cloudflared.log
+
+tunnel-url:
+	@grep -o 'https://[^ ]*trycloudflare\.com[^ ]*' logs/cloudflared.log | tail -1 || echo "No tunnel URL found yet — try: make tail-tunnel"

@@ -16,6 +16,7 @@
 ;   60  M10  notification         — Telegram alerter
 ;   70  M11  health_monitor       — watchdog; starts last so targets are all up
 ;   80  M12  dashboard            — Flask UI; least critical
+;   85  cloudflared              — Cloudflare quick tunnel → exposes :8050
 ;
 ; M04 (custom model) is HALTED — omitted. Add back if re-enabled.
 ;
@@ -26,7 +27,7 @@
 ; ─────────────────────────────────────────────────────────────────────────────
 
 [group:kronos]
-programs=kronos-data-collection,kronos-slippage-model,kronos-macro-calendar,kronos-risk-check,kronos-mini-1h,kronos-base-1h,kronos-mini-4h,kronos-base-4h,kronos-execution,kronos-position-monitor,kronos-portfolio-manager,kronos-tax-tracker,kronos-notification,kronos-health-monitor,kronos-dashboard
+programs=kronos-data-collection,kronos-slippage-model,kronos-macro-calendar,kronos-risk-check,kronos-mini-1h,kronos-base-1h,kronos-mini-4h,kronos-base-4h,kronos-execution,kronos-position-monitor,kronos-portfolio-manager,kronos-tax-tracker,kronos-notification,kronos-health-monitor,kronos-dashboard,kronos-cloudflared
 
 
 ; ── M01 — Data Collection ────────────────────────────────────────────────────
@@ -334,3 +335,23 @@ stdout_logfile_backups=3
 stderr_logfile=__LOG_DIR__/m12_dashboard.err
 stderr_logfile_maxbytes=5MB
 stderr_logfile_backups=3
+
+
+; ── Cloudflare Tunnel — expose dashboard :8050 ───────────────────────────────
+; Uses a quick tunnel (no account needed). URL changes on each restart.
+; Find the URL: make tail-tunnel  (look for "trycloudflare.com" line)
+[program:kronos-cloudflared]
+command=cloudflared tunnel --url http://localhost:8050
+directory=__KRONOS_DIR__
+autostart=true
+autorestart=true
+startsecs=5
+startretries=5
+stopwaitsecs=10
+stopasgroup=true
+killasgroup=true
+priority=85
+redirect_stderr=true
+stdout_logfile=__LOG_DIR__/cloudflared.log
+stdout_logfile_maxbytes=5MB
+stdout_logfile_backups=3

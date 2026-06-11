@@ -47,6 +47,19 @@ sudo apt-get install -y --no-install-recommends \
     libsqlite3-dev ca-certificates
 echo "  ✓ done"
 
+# ── 1b  cloudflared ───────────────────────────────────────────────────────────
+echo "─── 1b  cloudflared (Cloudflare tunnel)"
+if ! command -v cloudflared &>/dev/null; then
+    ARCH=$(dpkg --print-architecture)
+    curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH}.deb" \
+        -o /tmp/cloudflared.deb
+    sudo dpkg -i /tmp/cloudflared.deb
+    rm -f /tmp/cloudflared.deb
+    echo "  ✓ cloudflared installed"
+else
+    echo "  ✓ cloudflared already installed ($(cloudflared --version 2>&1 | head -1))"
+fi
+
 # ── 2/8  Directories ──────────────────────────────────────────────────────────
 echo "─── 2/8  Directories"
 mkdir -p "$KRONOS_DIR/data" "$KRONOS_DIR/models" "$LOG_DIR"
