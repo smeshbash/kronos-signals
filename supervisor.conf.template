@@ -341,7 +341,7 @@ stderr_logfile_backups=3
 ; Uses a quick tunnel (no account needed). URL changes on each restart.
 ; Find the URL: make tail-tunnel  (look for "trycloudflare.com" line)
 [program:kronos-cloudflared]
-command=cloudflared tunnel --url http://localhost:8050
+command=/usr/local/bin/cloudflared tunnel --url http://localhost:8050
 directory=__KRONOS_DIR__
 autostart=true
 autorestart=true
