@@ -57,17 +57,19 @@ for sig in signals:
     h4c = conn.execute("""
         SELECT open, high, low, close FROM ohlcv
         WHERE symbol=? AND timeframe='4h' AND timestamp<=?
-        ORDER BY timestamp DESC LIMIT 6
+        ORDER BY timestamp DESC LIMIT 43
     """, (sym, ts)).fetchall()
 
     if len(h4c) < 6:
         skipped += 1
         continue
 
-    day_open  = float(h4c[-1]['open'])
-    day_close = float(h4c[0]['close'])
-    day_high  = max(float(r['high']) for r in h4c)
-    day_low   = min(float(r['low']  ) for r in h4c)
+    # ── Synthetic daily (last 6 × 4H) ────────────────────────────────────────
+    day_bars  = h4c[:6]
+    day_open  = float(day_bars[-1]['open'])
+    day_close = float(day_bars[0]['close'])
+    day_high  = max(float(r['high']) for r in day_bars)
+    day_low   = min(float(r['low']  ) for r in day_bars)
     day_rng   = day_high - day_low
     body_ratio = abs(day_close - day_open) / day_rng if day_rng > 0 else 1.0
 
@@ -78,19 +80,28 @@ for sig in signals:
     else:
         daily_state = 'bearish'
 
+    # ── SMA-42 on 4H (= 7-day trend) ─────────────────────────────────────────
+    current_close = float(h4c[0]['close'])
+    if len(h4c) >= 42:
+        sma42 = sum(float(r['close']) for r in h4c[:42]) / 42
+        above_sma42 = current_close > sma42
+    else:
+        above_sma42 = None   # insufficient history — fail open
+
     ret     = float(sig['actual_return_pct'])
     drx     = sig['direction']
     correct = (ret > HIT_THR) if drx == 'long' else (ret < -HIT_THR)
     pnl     = float(sig['pnl_net'] or sig['pnl_gross'] or 0)
 
     rows.append(dict(
-        regime  = sig['regime_version'],
-        symbol  = sym,
-        direction = drx,
+        regime      = sig['regime_version'],
+        symbol      = sym,
+        direction   = drx,
         daily_state = daily_state,
-        ret     = ret,
-        correct = correct,
-        pnl     = pnl,
+        above_sma42 = above_sma42,
+        ret         = ret,
+        correct     = correct,
+        pnl         = pnl,
     ))
 
 conn.close()
@@ -202,6 +213,76 @@ for sym in sorted(set(r['symbol'] for r in longs)):
         n, wr, ev = stats(subset)
         if n > 0:
             print(f'    {state:<12}  n={n:<4}  WR={wr:<8}  EV={ev}')
+
+# ── 8. Longs by SMA-42 state (all regimes) ───────────────────────────────────
+section('8. M04 LONGS — ABOVE vs BELOW SMA-42 (7-day trend, all regimes)')
+print(f'  {"SMA-42 state":<18}  {"n":<5}  {"WR":<8}  {"EV Rs/trade"}')
+print(f'  {SEP2}')
+for label, filt in [('above (bull trend)', lambda r: r["above_sma42"] is True),
+                    ('below (bear trend)', lambda r: r["above_sma42"] is False),
+                    ('unknown (no data)',  lambda r: r["above_sma42"] is None)]:
+    subset = [r for r in longs if filt(r)]
+    n, wr, ev = stats(subset)
+    if n > 0:
+        print(f'  {label:<18}  {n:<5}  {wr:<8}  {ev}')
+
+# ── 9. SMA-42 gate by regime version ─────────────────────────────────────────
+section('9. M04 LONGS — SMA-42 STATE × REGIME VERSION')
+print(f'  {"Regime":<8}  {"SMA-42":<18}  {"n":<5}  {"WR":<8}  {"EV Rs/trade"}')
+print(f'  {SEP2}')
+for rv in sorted(set(r['regime'] for r in rows)):
+    rv_longs = [r for r in longs if r['regime'] == rv]
+    if not rv_longs:
+        continue
+    for label, filt in [('above', lambda r: r["above_sma42"] is True),
+                        ('below', lambda r: r["above_sma42"] is False)]:
+        subset = [r for r in rv_longs if filt(r)]
+        n, wr, ev = stats(subset)
+        if n > 0:
+            print(f'  v{rv:<7}  {label:<18}  {n:<5}  {wr:<8}  {ev}')
+    print()
+
+# ── 10. SMA-42 gate simulation ────────────────────────────────────────────────
+section('10. GATE SIMULATION — block M04 longs when price below SMA-42')
+above = [r for r in longs if r['above_sma42'] is True]
+below = [r for r in longs if r['above_sma42'] is False]
+unkn  = [r for r in longs if r['above_sma42'] is None]
+
+print(f'\n  Without gate (all longs):')
+n, wr, ev = stats(longs)
+print(f'    n={n}  WR={wr}  EV={ev} Rs/trade  Total PnL={sum(r["pnl"] for r in longs):+.0f}')
+
+print(f'\n  With gate (above SMA-42 only):')
+n, wr, ev = stats(above)
+print(f'    n={n}  WR={wr}  EV={ev} Rs/trade  Total PnL={sum(r["pnl"] for r in above):+.0f}')
+
+print(f'\n  Blocked (below SMA-42):')
+n, wr, ev = stats(below)
+print(f'    n={n}  WR={wr}  EV={ev} Rs/trade  Total PnL={sum(r["pnl"] for r in below):+.0f}')
+
+if unkn:
+    print(f'\n  Fail-open (insufficient history):')
+    n, wr, ev = stats(unkn)
+    print(f'    n={n}  WR={wr}  EV={ev} Rs/trade  Total PnL={sum(r["pnl"] for r in unkn):+.0f}')
+
+pnl_gain = sum(r['pnl'] for r in above) - sum(r['pnl'] for r in longs)
+print(f'\n  Gate PnL impact: {pnl_gain:+.0f} Rs '
+      f'(positive = gate removes losing trades)')
+
+# ── 11. Combined: SMA-42 above + daily state ──────────────────────────────────
+section('11. COMBINED GATE — above SMA-42 AND bullish daily')
+combined  = [r for r in longs if r['above_sma42'] is True and r['daily_state'] == 'bullish']
+sma_only  = [r for r in longs if r['above_sma42'] is True and r['daily_state'] != 'bullish']
+neither   = [r for r in longs if r['above_sma42'] is False]
+
+print(f'\n  {"Filter":<35}  {"n":<5}  {"WR":<8}  {"EV Rs/trade"}')
+print(f'  {SEP2}')
+n, wr, ev = stats(combined)
+print(f'  {"above SMA-42 + bullish daily":<35}  {n:<5}  {wr:<8}  {ev}')
+n, wr, ev = stats(sma_only)
+print(f'  {"above SMA-42 + neutral/bearish daily":<35}  {n:<5}  {wr:<8}  {ev}')
+n, wr, ev = stats(neither)
+print(f'  {"below SMA-42 (blocked regardless)":<35}  {n:<5}  {wr:<8}  {ev}')
 
 print(f'\n{SEP}')
 print('  END OF ANALYSIS')
