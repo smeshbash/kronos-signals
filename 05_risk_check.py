@@ -865,24 +865,40 @@ class RiskCheck:
     @staticmethod
     def _get_4h_rvol(symbol: str, period: int = 20) -> Optional[float]:
         """
-        Compute RVOL = current 4H candle volume / rolling 20-period average volume.
+        Compute RVOL = current 4H candle volume / rolling average volume for the
+        same UTC hour-of-day slot (00:00, 04:00, 08:00, 12:00, 16:00, 20:00).
 
-        Returns None if fewer than 2 candles are available so callers can fail open.
-        A return of None means 'insufficient data' — the filter should not block
-        on missing volume data.
+        Time-of-day normalization prevents the daily volume cycle from triggering
+        the gate: overnight candles (00:00–08:00 UTC) carry ~10x less raw volume
+        than NY-session candles, so a mixed rolling average always flags them as
+        noise regardless of actual market conditions.
+
+        Returns None if no prior same-hour candles exist so callers fail open.
         """
         try:
             with get_connection() as conn:
-                rows = conn.execute(
+                latest = conn.execute(
+                    """SELECT volume, timestamp FROM ohlcv
+                       WHERE symbol=? AND timeframe='4h'
+                       ORDER BY timestamp DESC LIMIT 1""",
+                    (symbol,),
+                ).fetchone()
+                if latest is None:
+                    return None
+                curr_vol    = float(latest['volume'])
+                curr_ts     = int(latest['timestamp'])
+                hour_offset = curr_ts % 86400   # seconds since UTC midnight
+                prior_rows  = conn.execute(
                     """SELECT volume FROM ohlcv
                        WHERE symbol=? AND timeframe='4h'
+                         AND timestamp < ?
+                         AND (timestamp % 86400) = ?
                        ORDER BY timestamp DESC LIMIT ?""",
-                    (symbol, period + 1),
+                    (symbol, curr_ts, hour_offset, period),
                 ).fetchall()
-            if len(rows) < 2:
+            if not prior_rows:
                 return None
-            curr_vol = float(rows[0]['volume'])
-            avg_vol  = sum(float(r['volume']) for r in rows[1:]) / len(rows[1:])
+            avg_vol = sum(float(r['volume']) for r in prior_rows) / len(prior_rows)
             if avg_vol <= 0:
                 return None
             return curr_vol / avg_vol
