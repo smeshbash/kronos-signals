@@ -1919,6 +1919,7 @@ async def main() -> None:
         name='Risk Check — 1H cycle',
         max_instances=1,
         coalesce=True,
+        misfire_grace_time=3600,
     )
     scheduler.start()
     logger.info('Risk Check scheduler started — every hour at :12 UTC')
