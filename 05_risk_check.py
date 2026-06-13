@@ -177,27 +177,39 @@ MIN_WINRATE_TRADES_7D    = 1      # need at least 1 closed trade (no spec-define
 
 # ── Regime direction filter ────────────────────────────────────────────────────
 # Composite EMA stack on 4H candles. Both conditions must agree before the filter
-# activates — requires structural alignment, not just a brief price dip/spike.
+# activates — requires price position AND slope agreement to avoid whipsaws.
 #
-#   BEAR: close < EMA50  AND  EMA50 < EMA200  → shorts only (longs blocked)
-#   BULL: close > EMA50  AND  EMA50 > EMA200  → longs only  (shorts blocked)
-#   NEUTRAL: price and MAs disagree (transition) → both directions allowed
+#   BEAR: close < SMA50  AND  SMA20 slope falling (SMA20_now < SMA20_3ago)
+#   BULL: close > SMA50  AND  SMA20 slope rising  (SMA20_now > SMA20_3ago)
+#   NEUTRAL: price and slope disagree (transition) → both directions allowed
 #
-# Applies identically in paper and live mode. Rejected signals are written to the
-# DB with rejection_reason='regime_bear_long_blocked' | 'regime_bull_short_blocked'
-# for retrospective validation (actual_return_pct will populate as trades resolve).
+# Applied to custom model only. Foundation models (kronos-base-4h etc.) have
+# their own regime-like filters (RVOL gate, synthetic daily) and are excluded.
 #
+# Validated 2026-06-13: BEAR|long WR=9.1% (n=22), BULL|short WR=0% (n=3).
+# Previous EMA50/EMA200 version disabled 2026-06-07 — EMA200 (33-day lag)
+# fired BEAR after crash bottoms and BULL after extended rallies, inverting
+# signal quality. SMA50 + SMA20 slope reacts within candles of a trend change.
 # Disable without code change: set KRONOS_REGIME_FILTER=false in .env
-# Disabled 2026-06-07: retrospective analysis on 78 blocked longs showed the filter
-# was INVERTING signal quality — blocked longs averaged +0.146% (35.9% correct) while
-# executed longs averaged -3.526% (12.6% correct).  Root cause: EMA200 on 4H has a
-# ~33-day lag; it fires BEAR after the crash ends and blocks the bounce, while letting
-# all crash longs through as NEUTRAL.  Re-enable via KRONOS_REGIME_FILTER=true in .env.
-REGIME_FILTER_ENABLED = os.environ.get('KRONOS_REGIME_FILTER', 'false').lower() == 'true'
-REGIME_EMA_FAST       = 50    # 4H candles ≈ 8 days — medium-term momentum
-REGIME_EMA_SLOW       = 200   # 4H candles ≈ 33 days — structural trend
-REGIME_CANDLES_NEEDED = REGIME_EMA_SLOW + 50   # buffer for EMA seed accuracy
-REGIME_CACHE_TTL      = 900   # 15 min — 4H EMA doesn't change meaningfully intrabar
+REGIME_FILTER_ENABLED  = os.environ.get('KRONOS_REGIME_FILTER', 'true').lower() == 'true'
+REGIME_SMA_PRICE       = 50   # 4H candles ≈ 8.3 days — price position anchor
+REGIME_SMA_SLOPE       = 20   # 4H candles ≈ 3.3 days — slope / momentum
+REGIME_SLOPE_LOOKBACK  = 3    # candles back for slope comparison (≈ 12H)
+REGIME_CANDLES_NEEDED  = REGIME_SMA_PRICE + REGIME_SMA_SLOPE + REGIME_SLOPE_LOOKBACK + 10
+REGIME_CACHE_TTL       = 900  # 15 min — SMA doesn't change meaningfully intrabar
+REGIME_MODELS          = frozenset({'custom'})  # models subject to regime filter
+
+# Rolling win-rate suppression.
+# Blocks signals when a model's recent directional accuracy falls below threshold.
+# Validated 2026-06-13 (custom model, all regime versions combined):
+#   sub-40% rolling WR → next signal WR = 13.4% (n=97)
+#   55%+   rolling WR → next signal WR = 65.7% (n=35)
+# Applied to custom model only — foundation model rolling WR history too thin.
+# Fails open when fewer than ROLLING_WR_MIN_N resolved signals exist.
+ROLLING_WR_WINDOW    = 15    # resolved signals to evaluate
+ROLLING_WR_MIN_N     = 10    # min resolved signals needed to fire (else fail open)
+ROLLING_WR_THRESHOLD = 0.40  # WR below this → block
+ROLLING_WR_MODELS    = frozenset({'custom'})
 
 # Module-level cache: {symbol: (regime, expiry_unix_ts)}
 # Persists across signals within a single M5 run cycle; refreshed every 15 minutes.
@@ -352,12 +364,21 @@ class RiskCheck:
         if _conf_block:
             rejection_reason = _conf_block
 
-        # ── Regime direction filter (paper + live) ────────────────────────────
-        # Composite EMA50/EMA200 on 4H. Blocks longs in bear, shorts in bull.
-        # Neutral (transition) passes both directions through unchanged.
-        # See REGIME_FILTER_ENABLED, REGIME_EMA_FAST, REGIME_EMA_SLOW constants.
+        # ── Rolling WR suppression (paper + live) ────────────────────────────
+        # Blocks when model's recent directional WR < ROLLING_WR_THRESHOLD.
+        # Fails open if fewer than ROLLING_WR_MIN_N resolved signals exist.
         if not rejection_reason:
-            _regime_block = self._check_regime_direction_block(symbol, direction)
+            _wr_block = RiskCheck._check_rolling_wr_block(model_source, direction)
+            if _wr_block:
+                rejection_reason = _wr_block
+
+        # ── Regime direction filter (paper + live) ────────────────────────────
+        # SMA50 price position + SMA20 slope. Custom model only.
+        # BEAR (price<SMA50, slope falling) → longs blocked.
+        # BULL (price>SMA50, slope rising)  → shorts blocked.
+        if not rejection_reason:
+            _regime_block = RiskCheck._check_regime_direction_block(
+                symbol, direction, model_source)
             if _regime_block:
                 rejection_reason = _regime_block
 
@@ -743,16 +764,16 @@ class RiskCheck:
     @staticmethod
     def _fetch_regime(symbol: str) -> str:
         """
-        Classify the current market regime for symbol using a composite EMA stack
-        on 4H candles. Returns 'bull', 'bear', or 'neutral'.
+        Classify the current market regime for symbol using SMA50 price position
+        and SMA20 slope on 4H candles. Returns 'bull', 'bear', or 'neutral'.
 
-        Composite rule — both conditions must agree:
-          BEAR: close < EMA50 AND EMA50 < EMA200
-          BULL: close > EMA50 AND EMA50 > EMA200
-          NEUTRAL: any other configuration (transition / ranging)
+        Both conditions must agree (price position AND slope direction):
+          BEAR: close < SMA50  AND  SMA20 slope falling (vs REGIME_SLOPE_LOOKBACK ago)
+          BULL: close > SMA50  AND  SMA20 slope rising  (vs REGIME_SLOPE_LOOKBACK ago)
+          NEUTRAL: price and slope disagree (transition / ranging)
 
         Neutral means the filter does not activate — both directions are allowed.
-        This prevents whipsawing during genuine trend transitions.
+        Reacts within candles of a trend change (vs 33-day lag of prior EMA200 version).
 
         Results are cached for REGIME_CACHE_TTL (15 min) per symbol. Fails open
         (returns 'neutral') on any DB or computation error so a data gap never
@@ -773,21 +794,24 @@ class RiskCheck:
                     (symbol, REGIME_CANDLES_NEEDED),
                 ).fetchall()
 
-            if len(rows) < REGIME_EMA_SLOW + 10:
-                # Insufficient history — fail open
+            min_needed = REGIME_SMA_PRICE + REGIME_SMA_SLOPE + REGIME_SLOPE_LOOKBACK
+            if len(rows) < min_needed:
                 _regime_cache[symbol] = ('neutral', now + REGIME_CACHE_TTL)
                 return 'neutral'
 
-            closes   = [float(r['close']) for r in reversed(rows)]
-            ema_fast = _compute_ema(closes, REGIME_EMA_FAST)
-            ema_slow = _compute_ema(closes, REGIME_EMA_SLOW)
-            current  = closes[-1]
+            closes    = [float(r['close']) for r in reversed(rows)]
+            current   = closes[-1]
+            sma50     = sum(closes[-REGIME_SMA_PRICE:]) / REGIME_SMA_PRICE
+            sma20_now = sum(closes[-REGIME_SMA_SLOPE:]) / REGIME_SMA_SLOPE
+            sma20_ago = sum(
+                closes[-(REGIME_SMA_SLOPE + REGIME_SLOPE_LOOKBACK):-REGIME_SLOPE_LOOKBACK]
+            ) / REGIME_SMA_SLOPE
 
-            if current < ema_fast and ema_fast < ema_slow:
+            if current < sma50 and sma20_now < sma20_ago:
                 regime = 'bear'
-            elif current > ema_fast and ema_fast > ema_slow:
+            elif current > sma50 and sma20_now > sma20_ago:
                 regime = 'bull'
-            # else: neutral (price and MAs disagree — transition)
+            # else: neutral — price and slope disagree (transition)
 
         except Exception as exc:
             logger.warning('_fetch_regime failed for %s: %s — failing open', symbol, exc)
@@ -1150,32 +1174,78 @@ class RiskCheck:
         return None   # APPROVED: RVOL in band (or no data) + non-bullish daily
 
     @staticmethod
-    def _check_regime_direction_block(symbol: str, direction: str) -> Optional[str]:
+    @staticmethod
+    def _check_rolling_wr_block(model_source: str, direction: str) -> Optional[str]:
         """
-        Regime direction filter. Returns rejection reason or None.
+        Rolling win-rate suppression. Returns rejection reason or None.
 
-        BEAR regime: blocks longs  (shorts pass through)
-        BULL regime: blocks shorts (longs pass through)
-        NEUTRAL:     no block      (both directions pass)
+        Computes WR over the last ROLLING_WR_WINDOW resolved signals for this
+        model_source + direction (all symbols combined — per-symbol sample too thin).
+        Blocks if WR < ROLLING_WR_THRESHOLD. Fails open if fewer than
+        ROLLING_WR_MIN_N resolved signals exist.
+
+        Validated 2026-06-13: sub-40% rolling WR → 13.4% actual WR on next 97 signals.
+        """
+        if model_source not in ROLLING_WR_MODELS:
+            return None
+        try:
+            with get_connection() as conn:
+                rows = conn.execute(
+                    """SELECT actual_return_pct, direction FROM signals
+                       WHERE model_source=? AND direction=?
+                         AND actual_return_pct IS NOT NULL
+                       ORDER BY signal_timestamp DESC LIMIT ?""",
+                    (model_source, direction, ROLLING_WR_WINDOW),
+                ).fetchall()
+            if len(rows) < ROLLING_WR_MIN_N:
+                return None   # insufficient history — fail open
+            correct = sum(
+                1 for r in rows
+                if (r['direction'] == 'long'  and float(r['actual_return_pct']) > 0) or
+                   (r['direction'] == 'short' and float(r['actual_return_pct']) < 0)
+            )
+            wr = correct / len(rows)
+            if wr < ROLLING_WR_THRESHOLD:
+                return (
+                    f'rolling_wr_block: {model_source} {direction} '
+                    f'rolling WR={wr*100:.1f}% over last {len(rows)} resolved signals '
+                    f'below {ROLLING_WR_THRESHOLD*100:.0f}% threshold — suppressed'
+                )
+            return None
+        except Exception as exc:
+            logger.warning('_check_rolling_wr_block failed: %s — failing open', exc)
+            return None
+
+    @staticmethod
+    def _check_regime_direction_block(
+        symbol: str, direction: str, model_source: str = 'custom',
+    ) -> Optional[str]:
+        """
+        Regime direction filter (custom model only). Returns rejection reason or None.
+
+        BEAR (close < SMA50, SMA20 slope falling): blocks longs, allows shorts
+        BULL (close > SMA50, SMA20 slope rising):  blocks shorts, allows longs
+        NEUTRAL (price/slope disagree):            no block, both directions pass
 
         Applied before the paper/live branch so it runs identically in both modes.
-        Rejected signals are persisted to the DB with the regime rejection reason,
-        providing a paper trail for retrospective filter validation.
+        Foundation models excluded — they have their own regime-like filters.
         """
         if not REGIME_FILTER_ENABLED:
+            return None
+        if model_source not in REGIME_MODELS:
             return None
 
         regime = RiskCheck._fetch_regime(symbol)
 
         if regime == 'bear' and direction == 'long':
             return (
-                f'regime_bear_long_blocked: {symbol} close<EMA{REGIME_EMA_FAST}'
-                f'<EMA{REGIME_EMA_SLOW} on 4H — longs blocked in bear regime'
+                f'regime_bear_long_blocked: {symbol} price<SMA{REGIME_SMA_PRICE} '
+                f'with SMA{REGIME_SMA_SLOPE} slope falling — bear regime, longs suppressed'
             )
         if regime == 'bull' and direction == 'short':
             return (
-                f'regime_bull_short_blocked: {symbol} close>EMA{REGIME_EMA_FAST}'
-                f'>EMA{REGIME_EMA_SLOW} on 4H — shorts blocked in bull regime'
+                f'regime_bull_short_blocked: {symbol} price>SMA{REGIME_SMA_PRICE} '
+                f'with SMA{REGIME_SMA_SLOPE} slope rising — bull regime, shorts suppressed'
             )
         return None
 
