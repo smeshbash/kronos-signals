@@ -208,9 +208,12 @@ class NotificationModule:
                     ctx['tp_price']   = pos['take_profit_price']
                     ctx['margin_inr'] = float(pos['margin_used'] or 0)
 
-                # Latest portfolio snapshot
+                # Latest aggregate portfolio snapshot (model_source IS NULL = aggregate;
+                # per-model rows are written after the aggregate by M8, so without this
+                # filter the latest row would be a single model's capital pool, not total)
                 snap = conn.execute(
-                    'SELECT total_value FROM portfolio_snapshots ORDER BY id DESC LIMIT 1'
+                    'SELECT total_value FROM portfolio_snapshots '
+                    'WHERE model_source IS NULL ORDER BY id DESC LIMIT 1'
                 ).fetchone()
                 if snap:
                     ctx['portfolio_value'] = float(snap['total_value'])
@@ -518,7 +521,7 @@ class NotificationModule:
         with get_connection() as conn:
             snap = conn.execute(
                 'SELECT total_value, peak_value FROM portfolio_snapshots '
-                'ORDER BY id DESC LIMIT 1'
+                'WHERE model_source IS NULL ORDER BY id DESC LIMIT 1'
             ).fetchone()
             alert_row = conn.execute(
                 "SELECT event_type, data FROM events "
