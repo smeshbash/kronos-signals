@@ -211,6 +211,15 @@ ROLLING_WR_MIN_N     = 10    # min resolved signals needed to fire (else fail op
 ROLLING_WR_THRESHOLD = 0.40  # WR below this → block
 ROLLING_WR_MODELS    = frozenset({'custom'})
 
+# 4H RVOL same-hour reference window cutoff.
+# OHLCV volume unit changed ~June 5-6 2026 (old unit: millions, new unit: thousands).
+# Restricting the lookback to post-cutoff candles keeps the reference window on a
+# consistent unit so RVOL ratios are meaningful.
+# MIN_PERIODS: require at least this many same-hour candles before the gate fires;
+# fail open (return None) if fewer exist — never block on a thin reference window.
+RVOL_4H_CUTOFF_TS   = 1780704000   # 2026-06-06 00:00 UTC — first confirmed new-unit candle
+RVOL_4H_MIN_PERIODS = 5            # ~5 days of same-hour history needed to activate
+
 # Module-level cache: {symbol: (regime, expiry_unix_ts)}
 # Persists across signals within a single M5 run cycle; refreshed every 15 minutes.
 _regime_cache: dict = {}
@@ -916,11 +925,12 @@ class RiskCheck:
                     """SELECT volume FROM ohlcv
                        WHERE symbol=? AND timeframe='4h'
                          AND timestamp < ?
+                         AND timestamp >= ?
                          AND (timestamp % 86400) = ?
                        ORDER BY timestamp DESC LIMIT ?""",
-                    (symbol, curr_ts, hour_offset, period),
+                    (symbol, curr_ts, RVOL_4H_CUTOFF_TS, hour_offset, period),
                 ).fetchall()
-            if not prior_rows:
+            if len(prior_rows) < RVOL_4H_MIN_PERIODS:
                 return None
             avg_vol = sum(float(r['volume']) for r in prior_rows) / len(prior_rows)
             if avg_vol <= 0:
