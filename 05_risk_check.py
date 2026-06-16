@@ -135,7 +135,15 @@ MIN_PREDICTED_RETURN_PCT = ROUND_TRIP_FEES_PCT   # 0.17% — pure cost-recovery 
 # Root cause: low-confidence signals skew short (90 shorts in <0.4 range); those shorts
 # performed well in a bear market. Filter was cutting shorts and passing long-biased noise.
 # Fix: no confidence floor. Cost gate (MIN_PREDICTED_RETURN_PCT=0.17%) is the only filter.
-MIN_CONFIDENCE_BY_SOURCE: dict = {}
+#
+# 2026-06-16: custom model 0.30 floor ADDED after v5 trade analysis (n=31 closed trades).
+# Data showed a clean break at 0.30:
+#   below 0.30 (n=16): WR=12.5% (2W/14L), net -Rs 1,881 — pure capital destruction
+#   at or above 0.30 (n=15): WR=73% (11W/4L), net +Rs 2,801
+# The two wins below 0.30 (conf=0.094, 0.225) cost 14 losses to find — not worth it.
+MIN_CONFIDENCE_BY_SOURCE: dict = {
+    'custom': 0.30,
+}
 
 # Models that are completely disabled for execution. Signals from these sources are
 # rejected immediately before any other check. The signal generator continues running
