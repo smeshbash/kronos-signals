@@ -36,12 +36,13 @@ DELTA_WS_URL    = 'wss://socket.india.delta.exchange'
 DELTA_REST_BASE = 'https://api.india.delta.exchange'
 MODULE          = 'data_collection'
 
-# 4 active assets — slot 5 reserved for LINKUSD (add when ready).
+# 5 active assets — LINKUSD added 2026-06-16 (replaces frozen SOLUSD slot3 candidate).
 ASSETS: Dict[str, Dict[str, str]] = {
-    'BTC': {'delta': 'BTCUSD', 'ccxt': 'BTC/USD:USD'},
-    'ETH': {'delta': 'ETHUSD', 'ccxt': 'ETH/USD:USD'},
-    'BNB': {'delta': 'BNBUSD', 'ccxt': 'BNB/USD:USD'},
-    'XRP': {'delta': 'XRPUSD', 'ccxt': 'XRP/USD:USD'},
+    'BTC':  {'delta': 'BTCUSD',  'ccxt': 'BTC/USD:USD'},
+    'ETH':  {'delta': 'ETHUSD',  'ccxt': 'ETH/USD:USD'},
+    'BNB':  {'delta': 'BNBUSD',  'ccxt': 'BNB/USD:USD'},
+    'XRP':  {'delta': 'XRPUSD',  'ccxt': 'XRP/USD:USD'},
+    'LINK': {'delta': 'LINKUSD', 'ccxt': 'LINK/USD:USD'},
 }
 
 DELTA_SYMBOLS = [v['delta'] for v in ASSETS.values()]
