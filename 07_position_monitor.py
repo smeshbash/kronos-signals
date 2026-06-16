@@ -68,18 +68,20 @@ RETRY_DELAY_SEC        = 30
 # All monitored symbols — WebSocket subscribes to all regardless of open positions
 # so new positions are detected immediately without re-subscribing.
 ASSETS: dict[str, str] = {
-    'BTCUSD': 'BTC/USD:USD',
-    'ETHUSD': 'ETH/USD:USD',
-    'BNBUSD': 'BNB/USD:USD',
-    'XRPUSD': 'XRP/USD:USD',
+    'BTCUSD':  'BTC/USD:USD',
+    'ETHUSD':  'ETH/USD:USD',
+    'BNBUSD':  'BNB/USD:USD',
+    'XRPUSD':  'XRP/USD:USD',
+    'LINKUSD': 'LINK/USD:USD',
 }
 DELTA_SYMBOLS = list(ASSETS.keys())
 
 _DEFAULT_CONTRACT_SIZES: dict[str, float] = {
-    'BTCUSD': 0.001,
-    'ETHUSD': 0.01,
-    'BNBUSD': 0.1,
-    'XRPUSD': 10.0,
+    'BTCUSD':  0.001,
+    'ETHUSD':  0.01,
+    'BNBUSD':  0.1,
+    'XRPUSD':  1.0,    # corrected 2026-06-07 (was 10.0, inflated fees 10×)
+    'LINKUSD': 1.0,    # confirmed 2026-06-16 via ccxt load_markets()
 }
 
 _CCXT_TO_DELTA: dict[str, str] = {v: k for k, v in ASSETS.items()}

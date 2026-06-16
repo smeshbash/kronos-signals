@@ -144,18 +144,20 @@ PORTFOLIO_FALLBACK_INR = float(os.environ.get('KRONOS_PORTFOLIO_VALUE_INR', '100
 
 # Delta symbol → CCXT perpetual symbol
 ASSETS: dict[str, str] = {
-    'BTCUSD': 'BTC/USD:USD',
-    'ETHUSD': 'ETH/USD:USD',
-    'BNBUSD': 'BNB/USD:USD',
-    'XRPUSD': 'XRP/USD:USD',
+    'BTCUSD':  'BTC/USD:USD',
+    'ETHUSD':  'ETH/USD:USD',
+    'BNBUSD':  'BNB/USD:USD',
+    'XRPUSD':  'XRP/USD:USD',
+    'LINKUSD': 'LINK/USD:USD',
 }
 
 # Fallback contract sizes (base units per contract) when exchange.load_markets() fails
 _DEFAULT_CONTRACT_SIZES: dict[str, float] = {
-    'BTCUSD': 0.001,
-    'ETHUSD': 0.01,
-    'BNBUSD': 0.1,
-    'XRPUSD': 1.0,    # 1 XRP per contract — corrected 2026-06-07 (was 10.0, inflated fees 10×)
+    'BTCUSD':  0.001,
+    'ETHUSD':  0.01,
+    'BNBUSD':  0.1,
+    'XRPUSD':  1.0,    # 1 XRP per contract — corrected 2026-06-07 (was 10.0, inflated fees 10×)
+    'LINKUSD': 1.0,    # 1 LINK per contract — confirmed 2026-06-16 via ccxt load_markets()
 }
 
 
