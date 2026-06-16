@@ -126,7 +126,10 @@ _MODEL_HALTED_SYMBOLS: dict[str, frozenset] = {
     'kronos-mini':    frozenset({'ETHUSD'}),              # halted 2026-06-08: 0% long WR, no viable TP/SL fix
     'kronos-base':    frozenset({'BTCUSD', 'XRPUSD'}),   # halted 2026-06-08: BTC 5% WR/0% longs; XRP 0% WR (fees normal post-fix, but no directional edge)
     'kronos-mini-4h': frozenset({'BNBUSD'}),              # halted 2026-06-08: all 14 trades long in downtrend, no viable fix
-    'kronos-base-4h': frozenset({'ETHUSD', 'XRPUSD'}),   # halted 2026-06-08: ETH 20% WR/12L in downtrend; XRP 0% WR no viable combo
+    'kronos-base-4h': frozenset({'XRPUSD'}),              # halted 2026-06-08: XRP 0% WR no viable combo
+    # ETHUSD halt LIFTED 2026-06-16: RVOL gate + synthetic daily gate (added 2026-06-09/10) now
+    # provide structural protection. Hard halt redundant; v5 signal explorer (n=26 resolved) shows
+    # halt blocked 2 correct signals and only 1 wrong signal. Gate pair handles the underlying issue.
     # kronos-mini XRPUSD: halt LIFTED 2026-06-08 — post-fix re-analysis (10 trades, correct fees)
     #   shows TP=2.00x SL=0.25x is optimal: +Rs 757 sim, 94/400 profitable combos, 60% WR on shorts
 }
