@@ -31,10 +31,11 @@ OHLCV_TIMEFRAME  = '4h'
 OHLCV_LIMIT      = 500   # 500 × 4H = ~83 days — covers all 20 same-hour ref slots
 
 ASSETS = {
-    'BTC': {'delta': 'BTCUSD', 'ccxt': 'BTC/USD:USD'},
-    'ETH': {'delta': 'ETHUSD', 'ccxt': 'ETH/USD:USD'},
-    'BNB': {'delta': 'BNBUSD', 'ccxt': 'BNB/USD:USD'},
-    'XRP': {'delta': 'XRPUSD', 'ccxt': 'XRP/USD:USD'},
+    'BTC':  {'delta': 'BTCUSD',  'ccxt': 'BTC/USD:USD'},
+    'ETH':  {'delta': 'ETHUSD',  'ccxt': 'ETH/USD:USD'},
+    'BNB':  {'delta': 'BNBUSD',  'ccxt': 'BNB/USD:USD'},
+    'XRP':  {'delta': 'XRPUSD',  'ccxt': 'XRP/USD:USD'},
+    'LINK': {'delta': 'LINKUSD', 'ccxt': 'LINK/USD:USD'},
 }
 
 # Candles to spot-check before and after (BTC 4H at 00:00 UTC around unit change)
