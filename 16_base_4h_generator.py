@@ -351,8 +351,8 @@ class Base4HGenerator:
             log.exception('signal write failed for %s', symbol)
 
     def _active_symbols(self) -> list[str]:
-        """Fixed 4-asset universe: BTC + ETH + BNB + XRP. Slot 5 reserved for LINK."""
-        return ['BTCUSD', 'ETHUSD', 'BNBUSD', 'XRPUSD']
+        """Fixed 5-asset universe: BTC + ETH + BNB + XRP + LINK (added 2026-06-16)."""
+        return ['BTCUSD', 'ETHUSD', 'BNBUSD', 'XRPUSD', 'LINKUSD']
 
     # ── Scheduler ─────────────────────────────────────────────────────────────
 
