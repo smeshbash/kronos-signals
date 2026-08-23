@@ -230,6 +230,10 @@ class Execution:
             id='execution_cron',
             name='Execution — process approved signals (1H)',
             max_instances=1,
+            # Run late rather than skip when CPU-bound generator inference delays
+            # the loop wakeup (see 2026-08-23 M15/M2 skipped cycles). A late
+            # execution pass is safe: signal expiry still bounds staleness.
+            misfire_grace_time=600,
         )
         self._scheduler.start()
         log.info('Execution started (paper=%s, leverage=%.1fx)', PAPER_MODE, self._leverage)
@@ -782,6 +786,9 @@ class Execution:
             id=f'fill_timeout_{trade_id}',
             name=f'Fill timeout trade {trade_id}',
             max_instances=1,
+            # One-shot job — must fire even if the loop wakes late, else an
+            # unfilled order is never cancelled and the trade row leaks.
+            misfire_grace_time=3600,
         )
         log.debug('Fill timeout at %s for trade %d', run_at.isoformat(), trade_id)
 

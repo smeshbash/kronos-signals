@@ -421,6 +421,11 @@ class SlippageModel:
             minutes=15,
             id='slippage_update',
             max_instances=1,
+            # Run late rather than skip: heavy generator inference can starve this
+            # loop past APScheduler's ~1s default tolerance. Observed 2026-08-23
+            # 08:20-09:05 UTC: four consecutive cycles skipped ("missed by 4-20s")
+            # during M16's CPU-bound run — 73 min of staleness, module_stale alert.
+            misfire_grace_time=600,
         )
         self._scheduler.start()
 

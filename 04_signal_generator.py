@@ -810,6 +810,9 @@ class SignalGenerator:
                 CronTrigger(hour='0,4,8,12,16,20', minute=5, timezone='UTC'),
                 id='signal_4h',
                 name='Kronos 4H signal cycle',
+                # Run late rather than skip when CPU-bound sibling inference
+                # delays the loop wakeup (see 2026-08-23 M15/M2 skipped cycles).
+                misfire_grace_time=3600,
             )
 
             scheduler.add_job(
@@ -817,6 +820,7 @@ class SignalGenerator:
                 CronTrigger(day_of_week='sun', hour=0, minute=3, timezone='UTC'),
                 id='slot3_weekly',
                 name='Weekly Slot 3 selection',
+                misfire_grace_time=3600,
             )
 
             scheduler.start()

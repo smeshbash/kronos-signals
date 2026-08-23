@@ -140,7 +140,8 @@ class TaxTracker:
             id='tax_tracker_cycle',
             name='Tax & TDS Tracker 15-min cycle',
             max_instances=1,
-            misfire_grace_time=60,
+            # 300 (was 60): same loop-starvation margin as Module 8.
+            misfire_grace_time=300,
         )
         self._scheduler.start()
         log.info('Tax Tracker started.')

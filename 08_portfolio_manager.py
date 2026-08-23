@@ -140,7 +140,9 @@ class PortfolioManager:
             id='portfolio_cycle',
             name='Portfolio Manager 15-min cycle',
             max_instances=1,
-            misfire_grace_time=60,
+            # 300 (was 60): generator inference delayed loop wakeups by up to
+            # ~40s on 2026-08-23; 60s left little margin for a drawdown check.
+            misfire_grace_time=300,
         )
         self._scheduler.start()
         log.info('Portfolio Manager scheduler running.')
