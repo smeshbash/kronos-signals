@@ -53,7 +53,8 @@ import subprocess
 import time
 from typing import Optional
 
-from db import get_connection, init_db, log_event
+from db import (get_connection, init_db, log_event,
+                SIGNAL_REGIME_VERSION, get_regime_activation_ts)
 
 log = logging.getLogger(__name__)
 MODULE = 'health_monitor'
@@ -270,7 +271,7 @@ class HealthMonitor:
         Return critical issue if >= FO_MAX_COUNT forced_override events were written
         in the last FO_WINDOW_S (24H) -- indicates systemic instability.
         """
-        cutoff = now_ts - FO_WINDOW_S
+        cutoff = max(now_ts - FO_WINDOW_S, get_regime_activation_ts())
         with get_connection() as conn:
             row = conn.execute(
                 "SELECT COUNT(*) AS cnt FROM events "
@@ -301,11 +302,12 @@ class HealthMonitor:
         with get_connection() as conn:
             row = conn.execute(
                 "SELECT COUNT(*) AS total, "
-                "SUM(CASE WHEN pnl_gross > 0 THEN 1 ELSE 0 END) AS wins, "
-                "MIN(exit_timestamp) AS oldest_ts "
-                "FROM trades WHERE status = 'closed' AND exit_timestamp > ? "
-                "AND quality_flag IS NULL",
-                (cutoff,)
+                "SUM(CASE WHEN t.pnl_gross > 0 THEN 1 ELSE 0 END) AS wins, "
+                "MIN(t.exit_timestamp) AS oldest_ts "
+                "FROM trades t JOIN signals s ON s.id = t.signal_id "
+                "WHERE t.status = 'closed' AND t.exit_timestamp > ? "
+                "AND t.quality_flag IS NULL AND s.regime_version = ?",
+                (cutoff, SIGNAL_REGIME_VERSION)
             ).fetchone()
         if row is None:
             return []
@@ -344,8 +346,9 @@ class HealthMonitor:
         with get_connection() as conn:
             fo_row = conn.execute(
                 "SELECT id, timestamp FROM events "
-                "WHERE event_type = 'forced_override' "
+                "WHERE event_type = 'forced_override' AND timestamp >= ? "
                 "ORDER BY id DESC LIMIT 1",
+                (get_regime_activation_ts(),),
             ).fetchone()
         if fo_row is None:
             return []
@@ -423,13 +426,14 @@ class HealthMonitor:
 
         with get_connection() as conn:
             rows = conn.execute(
-                "SELECT symbol, COUNT(*) AS total, "
-                "SUM(CASE WHEN pnl_gross > 0 THEN 1 ELSE 0 END) AS wins, "
-                "MIN(exit_timestamp) AS oldest_ts "
-                "FROM trades WHERE status = 'closed' AND exit_timestamp > ? "
-                "AND quality_flag IS NULL "
-                "GROUP BY symbol",
-                (cutoff,)
+                "SELECT t.symbol, COUNT(*) AS total, "
+                "SUM(CASE WHEN t.pnl_gross > 0 THEN 1 ELSE 0 END) AS wins, "
+                "MIN(t.exit_timestamp) AS oldest_ts "
+                "FROM trades t JOIN signals s ON s.id = t.signal_id "
+                "WHERE t.status = 'closed' AND t.exit_timestamp > ? "
+                "AND t.quality_flag IS NULL AND s.regime_version = ? "
+                "GROUP BY t.symbol",
+                (cutoff, SIGNAL_REGIME_VERSION)
             ).fetchall()
 
         excluded: list[str] = []
@@ -489,13 +493,14 @@ class HealthMonitor:
 
         with get_connection() as conn:
             rows = conn.execute(
-                "SELECT symbol, COUNT(*) AS total, "
-                "SUM(CASE WHEN pnl_gross > 0 THEN 1 ELSE 0 END) AS wins, "
-                "MIN(exit_timestamp) AS oldest_ts "
-                "FROM trades WHERE status = 'closed' AND exit_timestamp > ? "
-                "AND quality_flag IS NULL "
-                "GROUP BY symbol",
-                (cutoff,)
+                "SELECT t.symbol, COUNT(*) AS total, "
+                "SUM(CASE WHEN t.pnl_gross > 0 THEN 1 ELSE 0 END) AS wins, "
+                "MIN(t.exit_timestamp) AS oldest_ts "
+                "FROM trades t JOIN signals s ON s.id = t.signal_id "
+                "WHERE t.status = 'closed' AND t.exit_timestamp > ? "
+                "AND t.quality_flag IS NULL AND s.regime_version = ? "
+                "GROUP BY t.symbol",
+                (cutoff, SIGNAL_REGIME_VERSION)
             ).fetchall()
 
         reinstated: list[str] = []
@@ -514,13 +519,15 @@ class HealthMonitor:
                 continue
 
             # Only reinstate if symbol is currently excluded (most recent event excluded=True)
+            # Regime-scoped: pre-activation exclusion events are archive (fresh start, v6).
             with get_connection() as conn:
                 latest = conn.execute(
                     "SELECT json_extract(data, '$.excluded') AS excluded_flag "
                     "FROM events WHERE event_type = 'asset_exclusion' "
                     "AND json_extract(data, '$.symbol') = ? "
+                    "AND timestamp >= ? "
                     "ORDER BY id DESC LIMIT 1",
-                    (symbol,)
+                    (symbol, get_regime_activation_ts())
                 ).fetchone()
             if latest is None:
                 continue  # never excluded, nothing to reinstate
@@ -605,9 +612,10 @@ class HealthMonitor:
         with get_connection() as conn:
             fo_row = conn.execute(
                 "SELECT id, timestamp FROM events "
-                "WHERE event_type = 'forced_override' "
+                "WHERE event_type = 'forced_override' AND timestamp >= ? "
                 "AND json_extract(data, '$.reason') = 'win_rate_below_50pct_30d' "
                 "ORDER BY id DESC LIMIT 1",
+                (get_regime_activation_ts(),),
             ).fetchone()
         if fo_row is None:
             return False

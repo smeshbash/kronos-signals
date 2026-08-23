@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 
 from flask import Flask, request, Response
 
-from db import DB_PATH
+from db import DB_PATH, SIGNAL_REGIME_VERSION
 
 app   = Flask(__name__)
 PORT  = int(os.environ.get('KRONOS_DASHBOARD_PORT', 8050))
@@ -206,8 +206,8 @@ def _get_filters() -> dict:
         direction = ''
     try:    days    = int(request.args.get('days',    30))
     except: days    = 30
-    try:    regime  = int(request.args.get('regime',   0))
-    except: regime  = 0
+    try:    regime  = int(request.args.get('regime',   SIGNAL_REGIME_VERSION))
+    except: regime  = SIGNAL_REGIME_VERSION
     try:    page    = max(0, int(request.args.get('page',    0)))
     except: page    = 0
     try:    sigpage = max(0, int(request.args.get('sigpage', 0)))
@@ -244,7 +244,7 @@ def _trade_where(f: dict):
     if f.get('days', 0) > 0:
         parts.append('t.entry_timestamp >= ?')
         params.append(int(time.time()) - f['days'] * 86400)
-    regime = f.get('regime', 5)
+    regime = f.get('regime', SIGNAL_REGIME_VERSION)
     if regime and regime > 0:                  # 0 = all regimes (no filter)
         parts.append('COALESCE(s.regime_version, 1) = ?')
         params.append(regime)
@@ -269,7 +269,7 @@ def _signal_where(f: dict):
     if f.get('days', 0) > 0:
         parts.append('signal_timestamp >= ?')
         params.append(int(time.time()) - f['days'] * 86400)
-    regime = f.get('regime', 5)
+    regime = f.get('regime', SIGNAL_REGIME_VERSION)
     if regime and regime > 0:
         parts.append('COALESCE(regime_version, 1) = ?')
         params.append(regime)
@@ -317,7 +317,7 @@ def _filter_count(f: dict) -> int:
     n = len(f.get('models', [])) + len(f.get('symbols', []))
     if f.get('direction'):        n += 1
     if f.get('days', 30) != 30:  n += 1
-    if f.get('regime', 5)  != 5: n += 1
+    if f.get('regime', SIGNAL_REGIME_VERSION)  != SIGNAL_REGIME_VERSION: n += 1
     if f.get('sig_status'):       n += 1
     return n
 
@@ -329,7 +329,7 @@ def _url_with(f: dict, **overrides) -> str:
     if m.get('direction'):
         parts.append(f"direction={m['direction']}")
     parts.append(f"days={m.get('days', 30)}")
-    parts.append(f"regime={m.get('regime', 5)}")
+    parts.append(f"regime={m.get('regime', SIGNAL_REGIME_VERSION)}")
     if m.get('page', 0):
         parts.append(f"page={m['page']}")
     if m.get('sigpage', 0):
@@ -352,7 +352,7 @@ def _active_filter_desc(f: dict) -> str:
         parts.append(f"Dir: {f['direction'].capitalize()}")
     if f.get('days', 30) != 30:
         parts.append('All time' if f.get('days') == 0 else f"Last {f['days']}d")
-    if f.get('regime', 5) != 5:
+    if f.get('regime', SIGNAL_REGIME_VERSION) != SIGNAL_REGIME_VERSION:
         parts.append('All regimes' if f.get('regime') == 0 else f"Regime v{f['regime']}")
     if f.get('sig_status'):
         _ss_labels = {
@@ -406,7 +406,7 @@ def get_data(f: dict) -> dict:
         row = (_q("SELECT total_value, drawdown_pct FROM portfolio_snapshots"
                   " WHERE model_source=? AND regime_version=?"
                   " ORDER BY timestamp DESC LIMIT 1",
-                  (_mk, f.get('regime', 5))) or [{}])[0]
+                  (_mk, f.get('regime', SIGNAL_REGIME_VERSION))) or [{}])[0]
         prow = (_q(f"""SELECT COALESCE(SUM(t.pnl_gross), 0) AS gross,
                               COALESCE(SUM(t.pnl_net),   0) AS net,
                               COUNT(*) AS n,
@@ -431,7 +431,7 @@ def get_data(f: dict) -> dict:
     pf = (_q("SELECT * FROM portfolio_snapshots"
              " WHERE model_source IS NULL AND regime_version=?"
              " ORDER BY timestamp DESC LIMIT 1",
-             (f.get('regime', 5),)) or [{}])[0]
+             (f.get('regime', SIGNAL_REGIME_VERSION),)) or [{}])[0]
 
     # ── Aggregate metrics (filtered) ───────────────────────────────────────────
     tw, tp = _trade_where(f)
@@ -452,7 +452,7 @@ def get_data(f: dict) -> dict:
                          " WHERE quality_flag IS NOT NULL") or [{'c': 0}])[0]['c']
     dd_row = _q("SELECT MAX(drawdown_pct) AS v FROM portfolio_snapshots"
                 " WHERE model_source IS NULL AND regime_version=?",
-                (f.get('regime', 5),))
+                (f.get('regime', SIGNAL_REGIME_VERSION),))
     max_dd = _f(dd_row[0]['v']) if dd_row else 0.0
 
     # ── Open positions (filtered) ─────────────────────────────────────────────
@@ -751,7 +751,7 @@ def get_data(f: dict) -> dict:
     if f.get('direction') and f['direction'] not in ('both', ''):
         _wt_parts.append('direction = ?')
         _wt_params.append(f['direction'])
-    _wt_regime = f.get('regime', 5)
+    _wt_regime = f.get('regime', SIGNAL_REGIME_VERSION)
     if _wt_regime and _wt_regime > 0:
         _wt_parts.append('COALESCE(regime_version, 1) = ?')
         _wt_params.append(_wt_regime)
@@ -1287,7 +1287,9 @@ def _render_filter_bar(f: dict, all_symbols: list) -> str:
         day_opts += f'<option value="{v}"{sel}>{lbl}</option>'
 
     reg_opts = ''
-    for v, lbl in [('5','Regime v5 (current)'),('4','Regime v4 (archive)'),('3','Regime v3 (archive)'),('2','Regime v2 (archive)'),('1','Regime v1 (archive)'),('0','All regimes')]:
+    for v, lbl in ([(str(SIGNAL_REGIME_VERSION), f'Regime v{SIGNAL_REGIME_VERSION} (current)')]
+                   + [(str(_v), f'Regime v{_v} (archive)') for _v in range(SIGNAL_REGIME_VERSION - 1, 0, -1)]
+                   + [('0', 'All regimes')]):
         sel = ' selected' if str(f['regime']) == v else ''
         reg_opts += f'<option value="{v}"{sel}>{lbl}</option>'
 
@@ -2505,7 +2507,7 @@ def render(d: dict, f: dict) -> str:
   <span class="topbar-brand">&#9654;&nbsp; KRONOS</span>
   <span class="topbar-right">
     {mode_pill}
-    <span class="pill pill-regime">Regime v5</span>
+    <span class="pill pill-regime">Regime v{SIGNAL_REGIME_VERSION}</span>
     <span class="pill pill-phase">{phase_lbl}</span>
     <span>Updated {updated}</span>
     <span style="color:#dfe1e6">|</span>

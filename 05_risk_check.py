@@ -51,7 +51,8 @@ from typing import Optional
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from db import get_connection, init_db, log_event
+from db import (get_connection, init_db, log_event,
+                SIGNAL_REGIME_VERSION, get_regime_activation_ts)
 
 logger = logging.getLogger(__name__)
 
@@ -593,13 +594,18 @@ class RiskCheck:
         'forced_override_cleared' event. If active, all signal approvals are
         blocked until a human writes a forced_override_cleared event
         (Section 19.3 Option A: Resume).
+
+        Regime-scoped: overrides written before the current regime activation
+        are archive — a regime bump is a clean slate (fresh start, v6).
         """
         try:
             with get_connection() as conn:
                 row = conn.execute(
                     """SELECT event_type FROM events
                        WHERE event_type IN ('forced_override', 'forced_override_cleared')
+                         AND timestamp >= ?
                        ORDER BY id DESC LIMIT 1""",
+                    (get_regime_activation_ts(),),
                 ).fetchone()
             if row and row['event_type'] == 'forced_override':
                 return 'system_halted_forced_override'
@@ -623,11 +629,14 @@ class RiskCheck:
         try:
             with get_connection() as conn:
                 rows = conn.execute(
-                    """SELECT id, pnl_gross, exit_timestamp FROM trades
-                       WHERE status='closed' AND pnl_gross IS NOT NULL
-                         AND quality_flag IS NULL
-                       ORDER BY exit_timestamp DESC LIMIT ?""",
-                    (CONSECUTIVE_LOSS_LIMIT,),
+                    """SELECT t.id, t.pnl_gross, t.exit_timestamp
+                       FROM trades t
+                       JOIN signals s ON s.id = t.signal_id
+                       WHERE t.status='closed' AND t.pnl_gross IS NOT NULL
+                         AND t.quality_flag IS NULL
+                         AND s.regime_version = ?
+                       ORDER BY t.exit_timestamp DESC LIMIT ?""",
+                    (SIGNAL_REGIME_VERSION, CONSECUTIVE_LOSS_LIMIT),
                 ).fetchall()
             if not (len(rows) == CONSECUTIVE_LOSS_LIMIT and
                     all(r['pnl_gross'] < 0 for r in rows)):
@@ -703,7 +712,9 @@ class RiskCheck:
                 rows = conn.execute(
                     """SELECT data FROM events
                        WHERE event_type='asset_exclusion' AND data IS NOT NULL
+                         AND timestamp >= ?
                        ORDER BY timestamp DESC""",
+                    (get_regime_activation_ts(),),
                 ).fetchall()
             seen: set = set()
             for row in rows:
@@ -1657,10 +1668,13 @@ class RiskCheck:
             cutoff = int(time.time()) - WIN_RATE_7D_WINDOW
             with get_connection() as conn:
                 rows = conn.execute(
-                    """SELECT pnl_gross FROM trades
-                       WHERE status='closed' AND pnl_gross IS NOT NULL
-                         AND exit_timestamp >= ?""",
-                    (cutoff,),
+                    """SELECT t.pnl_gross
+                       FROM trades t
+                       JOIN signals s ON s.id = t.signal_id
+                       WHERE t.status='closed' AND t.pnl_gross IS NOT NULL
+                         AND t.exit_timestamp >= ?
+                         AND s.regime_version = ?""",
+                    (cutoff, SIGNAL_REGIME_VERSION),
                 ).fetchall()
             if len(rows) < MIN_WINRATE_TRADES_7D:
                 return 0.0
@@ -1879,12 +1893,15 @@ class RiskCheck:
         returns 'green' (normal operation).
         """
         try:
+            # Regime-scoped: alert events from earlier regimes are archive.
             with get_connection() as conn:
                 row = conn.execute(
                     """SELECT event_type FROM events
                        WHERE event_type IN
                          ('alert_red','alert_orange','alert_yellow','alert_cleared')
+                         AND timestamp >= ?
                        ORDER BY id DESC LIMIT 1""",
+                    (get_regime_activation_ts(),),
                 ).fetchone()
             if row:
                 et = row['event_type']

@@ -37,7 +37,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 
-from db import get_connection, init_db, log_event
+from db import get_connection, init_db, log_event, SIGNAL_REGIME_VERSION
 
 log = logging.getLogger(__name__)
 MODULE = 'execution'
@@ -877,12 +877,15 @@ class Execution:
         model-specific snapshot has been written yet (first cycle after startup).
         """
         try:
+            # Regime-scoped: snapshots from earlier regimes are archive — on a
+            # fresh regime the fallback (Rs 100k starting capital) applies until
+            # M8 writes the first current-regime snapshot.
             with get_connection() as conn:
                 row = conn.execute(
                     """SELECT total_value FROM portfolio_snapshots
-                       WHERE model_source = ?
+                       WHERE model_source = ? AND regime_version = ?
                        ORDER BY id DESC LIMIT 1""",
-                    (model_source,),
+                    (model_source, SIGNAL_REGIME_VERSION),
                 ).fetchone()
             if row:
                 return float(row['total_value'])

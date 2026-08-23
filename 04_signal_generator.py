@@ -74,7 +74,8 @@ import time
 from dataclasses import asdict, dataclass
 from typing import Optional
 
-from db import get_connection, init_db, log_event, SIGNAL_REGIME_VERSION
+from db import (get_connection, init_db, log_event,
+                SIGNAL_REGIME_VERSION, get_regime_activation_ts)
 
 try:
     from shadow_inference import ShadowInference
@@ -561,11 +562,15 @@ class SignalGenerator:
         """
         excluded = set()
         try:
+            # Regime-scoped: exclusion events written before the current regime
+            # activation are archive — a regime bump is a clean slate (fresh start, v6).
             with get_connection() as conn:
                 rows = conn.execute(
                     """SELECT data FROM events
                        WHERE event_type='asset_exclusion' AND data IS NOT NULL
+                         AND timestamp >= ?
                        ORDER BY timestamp DESC""",
+                    (get_regime_activation_ts(),),
                 ).fetchall()
             seen: set = set()
             for row in rows:

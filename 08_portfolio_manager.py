@@ -34,7 +34,8 @@ import ccxt
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from db import get_connection, init_db, log_event, SIGNAL_REGIME_VERSION
+from db import (get_connection, init_db, log_event,
+                SIGNAL_REGIME_VERSION, get_regime_activation_ts)
 from tax_utils import incremental_tax, effective_reserve_rate, SECTION_87A_LIMIT
 
 log = logging.getLogger(__name__)
@@ -334,11 +335,14 @@ class PortfolioManager:
         Read the current alert level from the most recent alert event in the DB.
         Returns 'green' if no alert events exist or the most recent was alert_cleared.
         """
+        # Regime-scoped: alert events from earlier regimes are archive.
         with get_connection() as conn:
             row = conn.execute(
                 """SELECT event_type FROM events
                    WHERE event_type IN ('alert_yellow','alert_orange','alert_red','alert_cleared')
-                   ORDER BY id DESC LIMIT 1"""
+                     AND timestamp >= ?
+                   ORDER BY id DESC LIMIT 1""",
+                (get_regime_activation_ts(),)
             ).fetchone()
         if not row:
             return 'green'

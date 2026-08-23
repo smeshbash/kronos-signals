@@ -51,7 +51,18 @@ DB_PATH = os.environ.get('KRONOS_DB_PATH', os.path.join(os.path.dirname(__file__
 #         - M14 (kronos-base 1H) + M15 (kronos-mini-4h) re-enabled with tuned per-asset configs
 #         - kronos-mini XRPUSD halt lifted: post-fix re-analysis (+Rs 757 sim, TP=2.0x SL=0.25x optimal)
 #       v1/v2/v3/v4 are historical reference. v5 is the current benchmark dataset.
-SIGNAL_REGIME_VERSION = 5
+#       v6 changes (2026-08-23) — FRESH START:
+#         - Clean-slate restart after ~1 week of downtime (system restarted 2026-08-23).
+#         - No pipeline rule changes vs v5 — v6 exists to give trading a clean baseline:
+#           per-model capital resets to Rs 100k, all trade-history-driven checks
+#           (consecutive losses, win rates, asset exclusions, forced overrides)
+#           now consider ONLY current-regime trades and control events.
+#         - Market data (ohlcv, orderbook_snapshots, funding_rates, fill windows,
+#           slippage calibration) is intentionally NOT regime-scoped — full history
+#           continues to serve inference and calibration.
+#         - Old trades/signals/events are retained untouched (archive, never deleted).
+#       v1–v5 are historical reference. v6 is the current benchmark dataset.
+SIGNAL_REGIME_VERSION = 6
 
 # ── Benchmark model ────────────────────────────────────────────────────────────
 # Set 2026-06-05. Purely an evaluation marker — zero impact on signal generation,
@@ -431,14 +442,14 @@ def init_db() -> None:
                     json.dumps({
                         'version': SIGNAL_REGIME_VERSION,
                         'changes': [
-                            'xrp_contract_size_fix: 1.0 XRP/contract (was 10.0 — fees ~10x inflated pre 2026-06-07)',
-                            'per_asset_tpsl: TP/SL tuned per model×symbol via MFE/MAE grid search (0.25x–5.0x, 400 combos)',
-                            'per_asset_halts: ETHUSD(mini), BTCUSD+XRPUSD(base), BNBUSD(mini-4h), ETHUSD+XRPUSD(base-4h)',
-                            'M14_M15_reenabled: kronos-base-1h and kronos-mini-4h active with tuned configs',
-                            'kronos_mini_xrp_halt_lifted: post-fix re-analysis confirmed TP=2.0x SL=0.25x optimal',
+                            'fresh_start: clean baseline after ~1 week downtime; no pipeline rule changes vs v5',
+                            'regime_scoped_history: consecutive-loss, win-rate, asset-exclusion and '
+                            'forced-override checks now read only current-regime trades/events',
+                            'capital_reset: per-model virtual capital restarts at Rs 100k (v6 snapshots)',
+                            'market_data_unscoped: ohlcv/orderbook/funding/slippage keep full history',
                         ],
-                        'note': 'v1/v2/v3/v4 are historical reference — exclude from benchmark comparisons. '
-                                'v5 is the primary benchmark dataset.',
+                        'note': 'v1-v5 are historical reference — exclude from benchmark comparisons. '
+                                'v6 is the primary benchmark dataset.',
                     }),
                 ),
             )
@@ -470,6 +481,40 @@ def log_event(
                 int(time.time()),
             ),
         )
+
+
+# Cached activation timestamp for the current regime version. Written once by
+# init_db() as a regime_change event; stable for the life of the process.
+_regime_activation_ts_cache: int | None = None
+
+
+def get_regime_activation_ts() -> int:
+    """
+    Unix timestamp when the current SIGNAL_REGIME_VERSION was activated
+    (the regime_change event written by init_db()).
+
+    Control-event readers (forced_override, asset_exclusion) and trade-history
+    checks use this as a floor so a regime bump is a clean slate: events and
+    trades from earlier regimes stop influencing behaviour without being deleted.
+
+    Returns 0 when the event cannot be found (fresh DB, events table missing) —
+    callers then degrade to unscoped behaviour, which is the pre-v6 semantics.
+    """
+    global _regime_activation_ts_cache
+    if _regime_activation_ts_cache is not None:
+        return _regime_activation_ts_cache
+    try:
+        with get_connection() as conn:
+            row = conn.execute(
+                """SELECT timestamp FROM events
+                   WHERE event_type='regime_change' AND data LIKE ?
+                   ORDER BY id ASC LIMIT 1""",
+                (f'%"version": {SIGNAL_REGIME_VERSION}%',),
+            ).fetchone()
+        _regime_activation_ts_cache = int(row['timestamp']) if row else 0
+    except Exception:
+        return 0   # not cached — retry on next call once the table exists
+    return _regime_activation_ts_cache
 
 
 def get_table_names() -> list[str]:

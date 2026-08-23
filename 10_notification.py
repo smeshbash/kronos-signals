@@ -45,7 +45,8 @@ from datetime import datetime, time as dtime, timezone
 from email.mime.text import MIMEText
 from typing import Optional
 
-from db import get_connection, init_db, log_event
+from db import (get_connection, init_db, log_event,
+                SIGNAL_REGIME_VERSION, get_regime_activation_ts)
 
 log = logging.getLogger(__name__)
 MODULE = 'notifier'
@@ -213,7 +214,9 @@ class NotificationModule:
                 # filter the latest row would be a single model's capital pool, not total)
                 snap = conn.execute(
                     'SELECT total_value FROM portfolio_snapshots '
-                    'WHERE model_source IS NULL ORDER BY id DESC LIMIT 1'
+                    'WHERE model_source IS NULL AND regime_version = ? '
+                    'ORDER BY id DESC LIMIT 1',
+                    (SIGNAL_REGIME_VERSION,)
                 ).fetchone()
                 if snap:
                     ctx['portfolio_value'] = float(snap['total_value'])
@@ -521,12 +524,17 @@ class NotificationModule:
         with get_connection() as conn:
             snap = conn.execute(
                 'SELECT total_value, peak_value FROM portfolio_snapshots '
-                'WHERE model_source IS NULL ORDER BY id DESC LIMIT 1'
+                'WHERE model_source IS NULL AND regime_version = ? '
+                'ORDER BY id DESC LIMIT 1',
+                (SIGNAL_REGIME_VERSION,)
             ).fetchone()
+            # Regime-scoped: alert events from earlier regimes are archive.
             alert_row = conn.execute(
                 "SELECT event_type, data FROM events "
                 "WHERE event_type IN ('alert_yellow','alert_orange','alert_red','alert_cleared') "
-                "ORDER BY id DESC LIMIT 1"
+                "AND timestamp >= ? "
+                "ORDER BY id DESC LIMIT 1",
+                (get_regime_activation_ts(),)
             ).fetchone()
             positions = conn.execute(
                 'SELECT symbol, direction, unrealised_pnl, entry_price '
