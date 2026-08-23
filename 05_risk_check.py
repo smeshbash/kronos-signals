@@ -456,6 +456,22 @@ class RiskCheck:
             if _base_4h_block:
                 rejection_reason = _base_4h_block
 
+        # ── custom (M4) alignment + volume filter (paper + live) ─────────────
+        # Implemented 2026-08-23 from counterfactual on all resolved custom signals.
+        # M4 was the largest historical loser (-Rs 12,734 gross, 88 trades) with
+        # below-coinflip raw accuracy both directions (longs 41.8% n=256, shorts
+        # 44.6% n=74). The same alignment+RVOL recipe that fixed the foundation
+        # models separates M4's signal from noise:
+        #   LONGS  daily-bullish + RVOL 0.75-1.50x: 76.9% acc, +0.71%/sig (n=13)
+        #          daily-bullish only:              59.0% acc, +0.25%/sig (n=61)
+        #          counter/neutral daily:           33.5% acc, -1.89%/sig (n=182) — block
+        #   SHORTS non-bullish daily + RVOL band:   90.0% acc, +1.78%/sig (n=10)
+        #          everything else:                 37.5% acc, -0.35%/sig (n=64) — block
+        if not rejection_reason:
+            _custom_block = RiskCheck._check_custom_filter(model_source, direction, symbol)
+            if _custom_block:
+                rejection_reason = _custom_block
+
         # ── Paper mode: benchmark fast-path ──────────────────────────────────
         # Goal: maximum throughput across all models for benchmark accuracy.
         #
@@ -1244,6 +1260,72 @@ class RiskCheck:
         except Exception as exc:
             logger.warning('_check_rolling_wr_block failed: %s — failing open', exc)
             return None
+
+    @staticmethod
+    def _check_custom_filter(
+        model_source: str,
+        direction:    str,
+        symbol:       str,
+    ) -> Optional[str]:
+        """
+        custom (M4) alignment + volume gate (2026-08-23).
+
+        Applied in both paper and live mode so v6 data accumulates under the
+        same filter conditions used in live trading.
+
+        The recipe mirrors the foundation-model filters that produced the only
+        profitable configurations (base-4h shorts 90%/n=40, mini-4h shorts
+        77%/n=61): trade WITH the synthetic daily candle and require the 4H
+        RVOL 0.75x-1.50x confirmation band.
+
+        LONGS — require bullish synthetic daily; RVOL band when volume data exists.
+          Counterfactual on 256 resolved custom longs:
+            counter/neutral daily: 33.5% acc, -1.89%/sig (n=182) → blocked
+            daily-bullish only:    59.0% acc, +0.25%/sig (n=61)  → pass (RVOL fail-open)
+            daily-bullish + RVOL:  76.9% acc, +0.71%/sig (n=13)  → pass
+
+        SHORTS — require non-bullish synthetic daily; RVOL band when data exists.
+          Counterfactual on 74 resolved custom shorts:
+            non-bullish + RVOL band: 90.0% acc, +1.78%/sig (n=10) → pass
+            everything else:         37.5% acc, -0.35%/sig (n=64) → blocked
+
+        Fail-open convention matches the other filters: missing RVOL data never
+        blocks; missing candle data classifies as 'neutral' (blocks longs,
+        passes shorts — the conservative direction given the loss history).
+        """
+        if model_source != 'custom':
+            return None
+
+        daily_state = RiskCheck._get_synthetic_daily_state(symbol)
+        rvol        = RiskCheck._get_4h_rvol(symbol)
+
+        if direction == 'long':
+            if daily_state != 'bullish':
+                return (
+                    f'custom_long_daily_not_bullish: {symbol} synthetic daily '
+                    f'(last 24H) is {daily_state} — counter/neutral-trend long. '
+                    f'Backtest 33.5% acc, -1.89%/sig (n=182). (2026-08-23)'
+                )
+            if rvol is not None and not (0.75 <= rvol <= 1.50):
+                return (
+                    f'custom_long_rvol_gate: RVOL={rvol:.2f}x outside '
+                    f'0.75–1.50x band on bullish daily. (2026-08-23)'
+                )
+            return None   # APPROVED: bullish daily + volume confirmed (or no data)
+
+        # ── Shorts ───────────────────────────────────────────────────────────
+        if daily_state == 'bullish':
+            return (
+                f'custom_short_daily_bullish_blocked: {symbol} synthetic daily '
+                f'(last 24H) is bullish — counter-trend short. '
+                f'Backtest 37.5% acc on blocked set (n=64). (2026-08-23)'
+            )
+        if rvol is not None and not (0.75 <= rvol <= 1.50):
+            return (
+                f'custom_short_rvol_gate: RVOL={rvol:.2f}x outside '
+                f'0.75–1.50x band. (2026-08-23)'
+            )
+        return None   # APPROVED: non-bullish daily + volume confirmed (or no data)
 
     @staticmethod
     def _check_regime_direction_block(
