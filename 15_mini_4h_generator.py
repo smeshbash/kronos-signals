@@ -2,8 +2,13 @@
 Kronos Trading System — Module 15: Kronos-mini 4H Signal Generator
 
 Standalone signal generator using the NeoQuasar/Kronos-mini foundation model
-at 4H resolution. Runs every 4H at :05 UTC with full 2048-candle 4H context
-(≈ 341 days — nearly a full year of 4H market structure).
+at 4H resolution. Runs every 4H at :30 UTC with a 1024-candle 4H context
+(≈ 170 days of 4H market structure).
+
+OOM fix (2026-08-23): context cut 2048→1024 and schedule moved :05→:30.
+At 2048 candles on CPU this process peaked at ~4.2GB RSS and was SIGKILLed by
+the kernel OOM killer every cycle since mid-June (176 kills, zero signals) —
+it fired at :05 simultaneously with M4 and M16. See supervisord.conf.
 
 Relationship to M13 (Kronos-mini 1H):
   Same model weights. Different timeframe, horizon, and schedule.
@@ -12,9 +17,9 @@ Relationship to M13 (Kronos-mini 1H):
 
 Key differences from M13:
   - Timeframe: 4H  (vs 1H for M13)
-  - Context:   2048 × 4H ≈ 341 days  (vs 2048 × 1H ≈ 85 days)
+  - Context:   1024 × 4H ≈ 170 days  (vs 2048 × 1H ≈ 85 days)
   - Horizon:   24H (6 × 4H)           (vs 6H for M13)
-  - Schedule:  every 4H at :05 UTC    (vs every 1H for M13)
+  - Schedule:  every 4H at :30 UTC    (vs every 1H for M13)
   - model_source: 'kronos-mini-4h'    (vs 'kronos-mini')
 
 Key differences from M4 (custom model, also 4H/24H):
@@ -74,8 +79,11 @@ HORIZON       = '24h'
 ATR_PERIOD    = 14
 SAMPLE_COUNT  = int(os.environ.get('KRONOS_SHADOW_SAMPLE_COUNT', '100'))
 
-# Full 2048-candle 4H context ≈ 341 days. Override via env if needed.
-CONTEXT_LEN = int(os.environ.get('KRONOS_MINI_4H_CONTEXT', '2048'))
+# 1024-candle 4H context ≈ 170 days. Override via env if needed.
+# Reduced from 2048 (2026-08-23): full context peaked ~4.2GB RSS on CPU and was
+# OOM-killed every cycle on the 7.6GB host. 1024 halves the tokenizer/attention
+# footprint while retaining ~6 months of market structure.
+CONTEXT_LEN = int(os.environ.get('KRONOS_MINI_4H_CONTEXT', '1024'))
 
 SLOT1_SYMBOL = 'BTCUSD'
 SLOT2_SYMBOL = 'ETHUSD'
@@ -354,7 +362,7 @@ class Mini4HGenerator:
     # ── Scheduler ─────────────────────────────────────────────────────────────
 
     async def start(self) -> None:
-        """Start Module 15. Load model, then run on 4H cron at :05 UTC."""
+        """Start Module 15. Load model, then run on 4H cron at :30 UTC."""
         init_db()
         log_event(MODULE, 'info', 'info', 'Kronos-mini 4H generator starting')
 
@@ -362,15 +370,22 @@ class Mini4HGenerator:
         await loop.run_in_executor(None, self._load_model)
 
         scheduler = AsyncIOScheduler(timezone='UTC')
+        # :30 (not :05) — OOM fix 2026-08-23. M15 is the heaviest inference in the
+        # stack (2048-candle context peaked at ~4.2GB RSS on CPU); running it at
+        # :05 alongside M4 and M16 tripped the kernel OOM killer every cycle since
+        # mid-June (176 SIGKILLs — zero signals, zero errors logged). Staggering to
+        # :30 serialises the memory peaks. Signals generated ~:3x are risk-checked
+        # by M5 at the next hourly :12 and executed at :14 — ~40 min entry latency
+        # on a 24H horizon (horizon_exit_at stays anchored to signal_timestamp).
         scheduler.add_job(
             self._job_generate,
-            CronTrigger(hour='0,4,8,12,16,20', minute=5, timezone='UTC'),
+            CronTrigger(hour='0,4,8,12,16,20', minute=30, timezone='UTC'),
             id='mini_4h',
             name='Kronos-mini 4H — 4H signal cycle',
             max_instances=1,
         )
         scheduler.start()
-        log.info('Kronos-mini 4H scheduler started — every 4H at :05 UTC, '
+        log.info('Kronos-mini 4H scheduler started — every 4H at :30 UTC, '
                  'context=%d candles ≈ %d days',
                  CONTEXT_LEN, CONTEXT_LEN * 4 // 24)
 
