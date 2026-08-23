@@ -325,6 +325,11 @@ class BaseGenerator:
             id='base_1h',
             name='Kronos-base — 1H signal cycle',
             max_instances=1,
+            # Run late rather than skip: CPU inference from a sibling generator can
+            # delay this loop's wakeup past APScheduler's ~1s default tolerance,
+            # silently discarding the cycle (observed 2026-08-23 08:30: M15 skipped
+            # because M16's inference pegged all cores for 40s past the trigger).
+            misfire_grace_time=3600,
         )
         scheduler.start()
         log.info('Kronos-base scheduler started — every 1H at :05 UTC, context=%d',
