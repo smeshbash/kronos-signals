@@ -115,6 +115,10 @@ class PositionMonitor:
         # Protects _position_cache and _exiting_pos_ids from concurrent access.
         self._cache_lock: asyncio.Lock = asyncio.Lock()
 
+        # Last WebSocket tick per symbol (epoch seconds). The REST backstop job
+        # only polls symbols whose feed has gone quiet while positions are open.
+        self._last_tick_ts: dict[str, float] = {}
+
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def _init_exchange(self) -> None:
@@ -158,6 +162,19 @@ class PositionMonitor:
             id='position_monitor_cron',
             name='Position Monitor — 15-min maintenance',
             max_instances=1,
+            misfire_grace_time=300,
+        )
+        # REST mark-price backstop — bounds SL/TP detection latency to ~1 min
+        # when the WebSocket feed goes quiet (72 disconnects/day observed
+        # 2026-08-23). Only polls symbols with open positions and a stale feed.
+        self._scheduler.add_job(
+            self._job_rest_backstop,
+            'interval',
+            seconds=60,
+            id='position_monitor_rest_backstop',
+            name='Position Monitor — REST mark-price backstop',
+            max_instances=1,
+            misfire_grace_time=30,
         )
         self._scheduler.start()
 
@@ -232,6 +249,7 @@ class PositionMonitor:
                             continue
 
                         # Check positions for this symbol against new mark price.
+                        self._last_tick_ts[symbol] = time.time()
                         await self._check_positions_from_tick(symbol, mark_price)
 
             except asyncio.CancelledError:
@@ -324,6 +342,54 @@ class PositionMonitor:
             async with self._cache_lock:
                 self._position_cache.pop(pos['id'], None)
                 self._exiting_pos_ids.discard(pos['id'])
+
+    # ── REST mark-price backstop ──────────────────────────────────────────────
+
+    TICK_STALE_BACKSTOP_SEC = 90   # feed considered quiet after this long without a tick
+
+    def _fetch_mark_rest(self, symbol: str) -> Optional[float]:
+        """Fetch current mark price for symbol via REST (blocking — call in executor)."""
+        ccxt_sym = ASSETS.get(symbol)
+        if ccxt_sym is None or self._exchange is None:
+            return None
+        try:
+            ticker = self._exchange.fetch_ticker(ccxt_sym)
+            info   = ticker.get('info') or {}
+            raw    = info.get('mark_price') or ticker.get('last')
+            return float(raw) if raw is not None else None
+        except Exception as exc:
+            log.warning('REST mark fetch failed for %s: %s', symbol, exc)
+            return None
+
+    async def _job_rest_backstop(self) -> None:
+        """
+        Once a minute: for every symbol that has an open cached position but no
+        WebSocket tick in the last TICK_STALE_BACKSTOP_SEC, fetch the mark price
+        via REST and run the normal tick exit check with it. Bounds worst-case
+        SL/TP detection latency to ~1 minute during feed outages (the 15-min
+        maintenance cron was previously the only fallback).
+        """
+        now = time.time()
+        async with self._cache_lock:
+            open_symbols = {
+                pos['symbol'] for pos in self._position_cache.values()
+                if pos['id'] not in self._exiting_pos_ids
+                and not (pos.get('sl_order_id') and pos.get('tp_order_id'))
+            }
+        stale = [s for s in open_symbols
+                 if now - self._last_tick_ts.get(s, 0) > self.TICK_STALE_BACKSTOP_SEC]
+        if not stale:
+            return
+
+        loop = asyncio.get_running_loop()
+        for symbol in stale:
+            mark = await loop.run_in_executor(None, self._fetch_mark_rest, symbol)
+            if mark is None:
+                continue
+            gap = now - self._last_tick_ts.get(symbol, 0)
+            log.info('REST backstop: %s feed quiet %.0fs — checking exits at mark=%.6f',
+                     symbol, gap, mark)
+            await self._check_positions_from_tick(symbol, mark)
 
     # ── 15-min maintenance cron ───────────────────────────────────────────────
 
@@ -890,6 +956,25 @@ class PositionMonitor:
             'paper':          PAPER_MODE,
             'realtime_exit':  True,   # marks this as WebSocket-triggered (vs old cron path)
         }
+
+        # Fill-quality telemetry: how far past the trigger did the fill land?
+        # Positive = filled worse than the trigger level (gap/latency slippage);
+        # ~0 = clean fill at the level. Turns "overshoot" into a measured stat
+        # (motivated by trade 669: 4.93%-wide ATR stop initially misread as slippage).
+        trigger = None
+        if exit_reason == 'stop_loss':
+            trigger = pos.get('stop_loss_price')
+        elif exit_reason == 'take_profit':
+            trigger = pos.get('take_profit_price')
+        if trigger:
+            # A long exits by selling: any fill below the trigger is adverse.
+            # A short exits by buying: any fill above the trigger is adverse.
+            # This one rule covers both SL and TP exits.
+            adverse = (exit_price - trigger) / trigger * 100.0
+            if direction == 'long':
+                adverse = -adverse
+            exit_data['trigger_price']       = trigger
+            exit_data['fill_vs_trigger_pct'] = round(adverse, 4)
 
         if exit_reason == 'stop_loss':
             blackout_until = exit_ts + STOP_LOSS_BLACKOUT_SEC
