@@ -522,7 +522,7 @@ def get_data(f: dict) -> dict:
                     AND timestamp>=s.signal_timestamp+{hz_secs})
             WHERE s.signal_timestamp < {cutoff_q}
               AND s.quality_flag IS NULL
-              AND s.model_source='{model_source}'
+              AND {'(s.model_source=\'custom\' OR s.model_source IS NULL)' if model_source == 'custom' else f"s.model_source='{model_source}'"}
               AND oe.close IS NOT NULL AND ox.close IS NOT NULL
         """)
         correct = sum(1 for r in rows
@@ -533,14 +533,18 @@ def get_data(f: dict) -> dict:
     def _pend_count(model_source):
         hz_secs, _ = _MODEL_HZ.get(model_source, (86400, '4h'))
         cutoff_q   = int(time.time()) - hz_secs
-        v = (_q("SELECT COUNT(*) AS v FROM signals"
-                " WHERE status NOT IN ('rejected','expired')"
-                "   AND quality_flag IS NULL AND model_source=?"
-                "   AND signal_timestamp>=?",
-                (model_source, cutoff_q)) or [{'v': 0}])[0]['v']
+        ms_clause  = ("(model_source='custom' OR model_source IS NULL)"
+                      if model_source == 'custom' else "model_source=?")
+        params     = (cutoff_q,) if model_source == 'custom' else (model_source, cutoff_q)
+        v = (_q(f"SELECT COUNT(*) AS v FROM signals"
+                f" WHERE status NOT IN ('rejected','expired')"
+                f"   AND quality_flag IS NULL AND {ms_clause}"
+                f"   AND signal_timestamp>=?",
+                params) or [{'v': 0}])[0]['v']
         return int(_f(v))
 
     _ACC_MODELS = [
+        ('custom',         'Custom',   '24H'),
         ('kronos-mini',    'Mini 1H',  '6H'),
         ('kronos-base',    'Base 1H',  '6H'),
         ('kronos-mini-4h', 'Mini 4H',  '24H'),
