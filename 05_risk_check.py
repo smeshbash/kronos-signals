@@ -1048,6 +1048,47 @@ class RiskCheck:
         return None   # unknown state — fail open
 
     @staticmethod
+    def _get_synthetic_daily_direction(symbol: str) -> str:
+        """
+        Returns 'up', 'flat', or 'down' based on the net 24H price movement
+        (last 6 × 4H bars), ignoring the body/range ratio.
+
+        Unlike _get_synthetic_daily_state(), this does not require a 30%
+        body/range ratio — it only asks whether the market net-closed higher
+        or lower than it opened, with a 0.1% dead zone to filter noise.
+
+        Used by the custom long filter so that gradual uptrends (large intraday
+        swings → small body/range but still net-positive) pass through.
+
+        Fails flat on any error or insufficient data.
+        """
+        MIN_MOVE_PCT = 0.001   # 0.1% dead zone
+        try:
+            with get_connection() as conn:
+                rows = conn.execute(
+                    """SELECT open, close FROM ohlcv
+                       WHERE symbol=? AND timeframe='4h'
+                       ORDER BY timestamp DESC LIMIT 6""",
+                    (symbol,),
+                ).fetchall()
+            if len(rows) < 6:
+                return 'flat'
+            syn_open  = float(rows[-1]['open'])
+            syn_close = float(rows[0]['close'])
+            if syn_open <= 0:
+                return 'flat'
+            move_pct = (syn_close - syn_open) / syn_open
+            if move_pct > MIN_MOVE_PCT:
+                return 'up'
+            if move_pct < -MIN_MOVE_PCT:
+                return 'down'
+            return 'flat'
+        except Exception as exc:
+            logger.warning('_get_synthetic_daily_direction failed for %s: %s — failing flat',
+                           symbol, exc)
+            return 'flat'
+
+    @staticmethod
     def _get_synthetic_daily_state(symbol: str) -> str:
         """
         Classify the synthetic daily candle for symbol by grouping the last
@@ -1278,42 +1319,47 @@ class RiskCheck:
         77%/n=61): trade WITH the synthetic daily candle and require the 4H
         RVOL 0.75x-1.50x confirmation band.
 
-        LONGS — require bullish synthetic daily; RVOL band when volume data exists.
-          Counterfactual on 256 resolved custom longs:
+        LONGS — require net-upward 24H direction; RVOL band when volume data exists.
+          The v5 counterfactual used a strict 30% body/range gate for "bullish":
             counter/neutral daily: 33.5% acc, -1.89%/sig (n=182) → blocked
-            daily-bullish only:    59.0% acc, +0.25%/sig (n=61)  → pass (RVOL fail-open)
+            daily-bullish only:    59.0% acc, +0.25%/sig (n=61)  → pass
             daily-bullish + RVOL:  76.9% acc, +0.71%/sig (n=13)  → pass
+          v6 observation (2026-08-25, week 33): the 30% gate blocked 17/17 correct
+          longs (100% directional accuracy) because gradual uptrends (BNB +0.14%,
+          ETH +0.21% net 24H) have large intraday swings that crush body/range.
+          Fix: use _get_synthetic_daily_direction() (net close>open >0.1%) for longs;
+          keep strict _get_synthetic_daily_state() for shorts where the 30% gate is valid.
 
-        SHORTS — require non-bullish synthetic daily; RVOL band when data exists.
+        SHORTS — require non-bullish (strict 30% body/range) synthetic daily; RVOL band.
           Counterfactual on 74 resolved custom shorts:
             non-bullish + RVOL band: 90.0% acc, +1.78%/sig (n=10) → pass
             everything else:         37.5% acc, -0.35%/sig (n=64) → blocked
 
         Fail-open convention matches the other filters: missing RVOL data never
-        blocks; missing candle data classifies as 'neutral' (blocks longs,
-        passes shorts — the conservative direction given the loss history).
+        blocks; missing candle data is flat/neutral (blocks longs, passes shorts).
         """
         if model_source != 'custom':
             return None
 
-        daily_state = RiskCheck._get_synthetic_daily_state(symbol)
-        rvol        = RiskCheck._get_4h_rvol(symbol)
+        rvol = RiskCheck._get_4h_rvol(symbol)
 
         if direction == 'long':
-            if daily_state != 'bullish':
+            daily_dir = RiskCheck._get_synthetic_daily_direction(symbol)
+            if daily_dir != 'up':
                 return (
-                    f'custom_long_daily_not_bullish: {symbol} synthetic daily '
-                    f'(last 24H) is {daily_state} — counter/neutral-trend long. '
-                    f'Backtest 33.5% acc, -1.89%/sig (n=182). (2026-08-23)'
+                    f'custom_long_daily_not_up: {symbol} 24H synthetic direction '
+                    f'is {daily_dir} (need net close>open >0.1%). '
+                    f'v6 relaxed from 30% body/range gate. (2026-08-25)'
                 )
             if rvol is not None and not (0.75 <= rvol <= 1.50):
                 return (
                     f'custom_long_rvol_gate: RVOL={rvol:.2f}x outside '
-                    f'0.75–1.50x band on bullish daily. (2026-08-23)'
+                    f'0.75–1.50x band on up daily. (2026-08-23)'
                 )
-            return None   # APPROVED: bullish daily + volume confirmed (or no data)
+            return None   # APPROVED: net-up daily + volume confirmed (or no data)
 
-        # ── Shorts ───────────────────────────────────────────────────────────
+        # ── Shorts — keep strict 30% body/range gate ─────────────────────────
+        daily_state = RiskCheck._get_synthetic_daily_state(symbol)
         if daily_state == 'bullish':
             return (
                 f'custom_short_daily_bullish_blocked: {symbol} synthetic daily '
