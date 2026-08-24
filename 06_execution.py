@@ -46,7 +46,14 @@ MODULE = 'execution'
 
 DELTA_REST_BASE = 'https://api.india.delta.exchange'
 
-MARGIN_PCT       = 0.10               # 10% margin per position, income phase (Section 10.3)
+MARGIN_PCT       = 0.10               # 10% margin per position — now a CEILING under R-sizing (Section 10.3)
+
+# R-based sizing (2026-08-24): every trade risks this fraction of the model's
+# capital pool at its stop — size is derived from the stop distance, with the
+# margin caps above acting as ceilings. 0.0075 = Rs 750 risk on a Rs 100k pool.
+# A 6-loss streak costs a known ~4.4%; under the old fixed-notional sizing the
+# same book carried Rs 45 to Rs 987 risk per trade (22:1 disparity).
+RISK_PCT_PER_TRADE = float(os.environ.get('KRONOS_RISK_PCT_PER_TRADE', '0.0075'))
 LEVERAGE_DEFAULT = float(os.environ.get('KRONOS_LEVERAGE', '2.0'))
 MAX_LEVERAGE     = 3.0                # hard ceiling (Section 8.1)
 SL_PCT           = 0.03              # 3% of portfolio stop loss — fallback only (Section 8.1)
@@ -389,18 +396,32 @@ class Execution:
         """
         Compute (margin_inr, notional_inr, size_contracts, entry_price, sl_price, tp_price).
 
-        SL/TP are ATR-based when entry_atr is available. Multipliers and min R:R are
-        per-model via _MODEL_ATR_CONFIG; defaults match the global ATR constants.
-        Falls back to portfolio-% distances when ATR is unavailable.
+        R-BASED SIZING (2026-08-24): position size is derived FROM the stop
+        distance so every trade risks the same fraction of the capital pool
+        (RISK_PCT_PER_TRADE, default 0.75%):
+
+            size = risk_budget_inr / (sl_dist × contract_size × USD_INR_RATE)
+
+        The old margin caps (10% / size_cap_pct / combined cap, ×leverage)
+        remain as CEILINGS — a tight-stop trade that would need oversized
+        notional to reach full risk budget is clamped to the margin cap and
+        simply risks less. Motivation: under fixed-notional sizing, ATR-scaled
+        stops produced a 22:1 risk disparity between trades in the same book
+        (trade 669 XRPUSD: 4.93% stop → -Rs 987, vs BTC 0.25×ATR stops → -Rs 45).
+
+        SL/TP are ATR-based when entry_atr is available. Multipliers and min R:R
+        are per-model via _MODEL_ATR_CONFIG; defaults match the global ATR
+        constants. Falls back to the legacy margin-based sizing with portfolio-%
+        distances when ATR is unavailable.
 
         Raises ExecutionSkipped if the position cannot be validly constructed.
         """
         size_cap_pct            = risk_data.get('size_cap_pct')
         combined_margin_cap_pct = risk_data.get('combined_margin_cap_pct')
 
-        # Effective margin percentage (Section 10.3 + Section 11.2 size_cap)
-        margin_pct = (size_cap_pct / 100.0) if size_cap_pct is not None else MARGIN_PCT
-        margin_inr = portfolio_value * margin_pct
+        # Effective margin percentage — now a CEILING (Section 10.3 + 11.2 size_cap)
+        margin_pct     = (size_cap_pct / 100.0) if size_cap_pct is not None else MARGIN_PCT
+        margin_cap_inr = portfolio_value * margin_pct
 
         # Combined margin cap enforcement — all-3-same-direction rule (Section 11.2).
         # Cap and existing margin are both scoped to this model's capital pool.
@@ -413,15 +434,11 @@ class Execution:
                     f'combined_margin_cap_exhausted: cap={combined_margin_cap_pct}% '
                     f'existing={existing_inr:.2f} available={available_inr:.2f}'
                 )
-            margin_inr = min(margin_inr, available_inr)
+            margin_cap_inr = min(margin_cap_inr, available_inr)
 
-        # Leverage (Section 8.1 — Module 6 enforces 3x hard ceiling)
-        leverage     = self._leverage
-        notional_inr = margin_inr * leverage
-        if notional_inr / margin_inr > MAX_LEVERAGE:
-            raise ExecutionSkipped(
-                f'leverage_exceeds_3x: computed={notional_inr / margin_inr:.2f}x'
-            )
+        leverage = self._leverage
+        if leverage > MAX_LEVERAGE:
+            raise ExecutionSkipped(f'leverage_exceeds_3x: configured={leverage:.2f}x')
 
         entry_price   = mark_price
         contract_size = self._contract_sizes.get(symbol, _DEFAULT_CONTRACT_SIZES.get(symbol, 0.001))
@@ -429,24 +446,43 @@ class Execution:
         if entry_price <= 0 or contract_size <= 0 or USD_INR_RATE <= 0:
             raise ExecutionSkipped('invalid_price_or_contract_params')
 
-        # size = notional_inr / (contract_size_usd × mark_price_usd × usd_inr_rate)
-        raw_size       = notional_inr / (contract_size * entry_price * USD_INR_RATE)
-        size_contracts = math.floor(raw_size * 1_000_000) / 1_000_000  # round down, 6 dp
+        notional_cap_inr = margin_cap_inr * leverage
+        inr_per_contract = contract_size * entry_price * USD_INR_RATE
 
-        if size_contracts <= 0:
-            raise ExecutionSkipped(
-                f'size_contracts_zero_after_floor: notional={notional_inr:.2f} '
-                f'raw={raw_size:.8f}'
-            )
-
-        # SL / TP distances — ATR-based (primary) or portfolio-% (fallback)
         if entry_atr is not None and entry_atr > 0:
+            # ── Primary path: ATR stop → R-based size ─────────────────────────
             sl_dist = sl_mult * entry_atr
             tp_dist = tp_mult * entry_atr
-            log.debug('ATR-based SL/TP: atr=%.4f sl_mult=%.2f tp_mult=%.2f sl_dist=%.4f tp_dist=%.4f',
-                      entry_atr, sl_mult, tp_mult, sl_dist, tp_dist)
+            if sl_dist <= 0:
+                raise ExecutionSkipped(f'sl_dist_not_positive: atr={entry_atr}')
+
+            risk_budget_inr       = portfolio_value * RISK_PCT_PER_TRADE
+            risk_per_contract_inr = sl_dist * contract_size * USD_INR_RATE
+            size_from_risk        = risk_budget_inr / risk_per_contract_inr
+
+            # Margin ceiling: tight stops would demand huge notional — clamp.
+            size_from_margin = notional_cap_inr / inr_per_contract
+            raw_size         = min(size_from_risk, size_from_margin)
+
+            log.debug('R-sizing: budget=%.0f INR risk/contract=%.4f INR '
+                      'size_risk=%.6f size_margin=%.6f -> %.6f',
+                      risk_budget_inr, risk_per_contract_inr,
+                      size_from_risk, size_from_margin, raw_size)
         else:
-            # Portfolio-% fallback — used only when OHLCV data is insufficient.
+            # ── Legacy fallback (no ATR): margin-based size, portfolio-% stops ─
+            raw_size = notional_cap_inr / inr_per_contract
+
+        size_contracts = math.floor(raw_size * 1_000_000) / 1_000_000  # round down, 6 dp
+        if size_contracts <= 0:
+            raise ExecutionSkipped(
+                f'size_contracts_zero_after_floor: raw={raw_size:.8f}'
+            )
+
+        notional_inr = size_contracts * inr_per_contract
+        margin_inr   = notional_inr / leverage
+
+        if entry_atr is None or entry_atr <= 0:
+            # Portfolio-% fallback distances — used only when OHLCV is insufficient.
             denom   = size_contracts * contract_size * USD_INR_RATE  # INR per $1 move
             sl_dist = (portfolio_value * SL_PCT) / denom
             tp_dist = (portfolio_value * TP_PCT) / denom
