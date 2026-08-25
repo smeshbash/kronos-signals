@@ -1144,10 +1144,13 @@ class RiskCheck:
 
         Applied in both paper and live mode.
 
-        LONGS — suspended entirely.
-          Reason: 28 historical signals. WR=21.4%, EV=-Rs 376/trade.
-          No volume or HTF filter produces positive EV. BNBUSD (57% of longs)
-          already execution-halted. Reinstate when model retrained.
+        LONGS — reinstated v6 2026-08-25 with net daily direction gate.
+          v5 history: WR=21.4%, EV=-Rs376/trade (n=28); 92.8% fired counter-trend.
+          v6 observation: 6/6 correct (100%) under blanket suspension — all signals
+          fired with positive actual_return_pct. Suspension was over-penalising.
+          Gate: require net close > open by >0.1% over last 6×4H (same gate applied
+          to custom and base-4h longs on 2026-08-25). No RVOL gate — v5 n too thin.
+          Monitor: if v6 WR drops below 50% at n≥20, re-suspend.
 
         SHORTS — skip when synthetic daily candle (last 6 × 4H = 24H) is bullish.
           Daily bullish:  n=3,  WR=0%,   EV=-Rs 333  → blocked
@@ -1163,13 +1166,17 @@ class RiskCheck:
         if model_source != 'kronos-mini-4h':
             return None
 
-        # ── Longs: suspended ─────────────────────────────────────────────────
+        # ── Longs: net daily direction gate (reinstated 2026-08-25) ──────────
         if direction == 'long':
-            return (
-                'kronos_mini_4h_longs_suspended: '
-                'WR=21.4% EV=-Rs376/trade on 28 historical signals; '
-                'no filter rescues them. Reinstate when model retrained. (2026-06-09)'
-            )
+            daily_dir = RiskCheck._get_synthetic_daily_direction(symbol)
+            if daily_dir != 'up':
+                return (
+                    f'kronos_mini_4h_long_daily_not_up: {symbol} 24H synthetic '
+                    f'direction is {daily_dir} — long suppressed when market net-flat/down. '
+                    f'Reinstated v6 with direction gate (v5 WR=21.4% n=28; v6 WR=100% n=6). '
+                    f'(2026-08-25)'
+                )
+            return None   # APPROVED: net-up daily
 
         # ── Shorts: skip when synthetic daily is bullish ──────────────────────
         daily_state = RiskCheck._get_synthetic_daily_state(symbol)
@@ -1195,13 +1202,14 @@ class RiskCheck:
         Applied in both paper and live mode so v5 data accumulates under the
         same filter conditions used in live trading.
 
-        LONGS — two-gate filter, mirrors shorts (2026-06-10).
+        LONGS — two-gate filter (2026-06-10), daily gate relaxed 2026-08-25.
           Historical suspension reason: 18 signals, WR=27.8%, EV=-Rs357/trade.
           15/18 longs fired against daily downtrend (structural model bias).
-          Zero historical longs fired with bullish daily alignment, so the
-          suspension penalised a slice with no negative evidence. Longs are
-          now gated by both daily direction and volume:
-          (1) Daily gate: bullish daily (last 24H) → proceed; neutral/bearish → block.
+          v6 observation: 3/3 rejected longs all correct (100%, +2.51% avg);
+          the 30% body/range "bullish" gate blocked gradual uptrends where net
+          24H move was positive but intraday swings kept body/range < 30%.
+          (1) Daily gate: net close > open by >0.1% (last 24H) → proceed; else block.
+              Relaxed from strict 30% body/range to net direction (2026-08-25).
           (2) RVOL 0.75x–1.50x gate: same band proven on shorts (WR=95%, n=20).
               Fail open (None) if RVOL unavailable — never block on missing data.
 
@@ -1221,14 +1229,15 @@ class RiskCheck:
         if model_source != 'kronos-base-4h':
             return None
 
-        # ── Longs: bullish daily + RVOL in band ──────────────────────────────
+        # ── Longs: net daily direction + RVOL in band ────────────────────────
         if direction == 'long':
-            daily_state = RiskCheck._get_synthetic_daily_state(symbol)
-            if daily_state != 'bullish':
+            daily_dir = RiskCheck._get_synthetic_daily_direction(symbol)
+            if daily_dir != 'up':
                 return (
-                    f'kronos_base_4h_long_daily_not_bullish: '
-                    f'{symbol} synthetic daily (last 24H) is {daily_state} — '
-                    f'long suppressed unless daily is bullish. (2026-06-10)'
+                    f'kronos_base_4h_long_daily_not_up: '
+                    f'{symbol} 24H synthetic direction is {daily_dir} — '
+                    f'long suppressed when market net-flat/down. '
+                    f'Relaxed from 30% body/range gate (2026-08-25).'
                 )
             rvol = RiskCheck._get_4h_rvol(symbol)
             if rvol is not None and not (0.75 <= rvol <= 1.50):
