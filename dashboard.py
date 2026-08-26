@@ -454,6 +454,11 @@ def get_data(f: dict) -> dict:
                 " WHERE model_source IS NULL AND regime_version=?",
                 (f.get('regime', SIGNAL_REGIME_VERSION),))
     max_dd = _f(dd_row[0]['v']) if dd_row else 0.0
+    cur_dd_row = _q("SELECT drawdown_pct FROM portfolio_snapshots"
+                    " WHERE model_source IS NULL AND regime_version=?"
+                    " ORDER BY timestamp DESC LIMIT 1",
+                    (f.get('regime', SIGNAL_REGIME_VERSION),))
+    cur_dd = _f(cur_dd_row[0]['drawdown_pct']) if cur_dd_row else 0.0
 
     # ── Open positions (filtered) ─────────────────────────────────────────────
     pw, pp = _pos_where(f)
@@ -796,6 +801,52 @@ def get_data(f: dict) -> dict:
         ORDER BY cnt DESC LIMIT 12
     """, (int(time.time()) - 86400,))
 
+    # P&L over last 24H and last 7 days (unfiltered — always show real totals)
+    _now_ts    = int(time.time())
+    _pnl_today = _f((_q("SELECT COALESCE(SUM(pnl_gross),0) AS g FROM trades"
+                         " WHERE status='closed' AND quality_flag IS NULL"
+                         " AND exit_timestamp >= ?", (_now_ts - 86400,)) or [{'g': 0}])[0]['g'])
+    _pnl_week  = _f((_q("SELECT COALESCE(SUM(pnl_gross),0) AS g FROM trades"
+                         " WHERE status='closed' AND quality_flag IS NULL"
+                         " AND exit_timestamp >= ?", (_now_ts - 7 * 86400,)) or [{'g': 0}])[0]['g'])
+
+    # Rolling WR block status (custom model longs + shorts — mirrors risk_check logic)
+    _ROLLING_WR_WINDOW    = 15
+    _ROLLING_WR_MIN_N     = 10
+    _ROLLING_WR_THRESHOLD = 0.40
+    rolling_wr: dict = {}
+    for _rwr_ms in ['custom']:
+        for _rwr_dir in ['long', 'short']:
+            _rwr_rows = _q(
+                """SELECT actual_return_pct, direction FROM signals
+                   WHERE (model_source=? OR (? = 'custom' AND model_source IS NULL))
+                     AND direction=? AND actual_return_pct IS NOT NULL
+                   ORDER BY signal_timestamp DESC LIMIT ?""",
+                (_rwr_ms, _rwr_ms, _rwr_dir, _ROLLING_WR_WINDOW)
+            )
+            _rwr_n = len(_rwr_rows)
+            if _rwr_n >= _ROLLING_WR_MIN_N:
+                _rwr_correct = sum(
+                    1 for r in _rwr_rows
+                    if (r['direction'] == 'long'  and _f(r['actual_return_pct']) > 0) or
+                       (r['direction'] == 'short' and _f(r['actual_return_pct']) < 0)
+                )
+                _rwr_wr = _rwr_correct / _rwr_n
+                rolling_wr[(_rwr_ms, _rwr_dir)] = {
+                    'wr': _rwr_wr, 'n': _rwr_n,
+                    'blocked': _rwr_wr < _ROLLING_WR_THRESHOLD,
+                }
+            else:
+                rolling_wr[(_rwr_ms, _rwr_dir)] = {'wr': None, 'n': _rwr_n, 'blocked': False}
+
+    # Most recent alert-level event (last 24H)
+    _alert_ev = _q("""SELECT event_type, message, created_at FROM events
+                      WHERE event_type IN ('system_halted','orange_alert','yellow_alert',
+                                           'circuit_breaker','red_alert')
+                        AND created_at >= ?
+                      ORDER BY created_at DESC LIMIT 1""", (_now_ts - 86400,))
+    alert_event = dict(_alert_ev[0]) if _alert_ev else None
+
     # 9. Generator health — per-model signal counts + rejection reasons (last 24H)
     _gh_ts = int(time.time())
     _gh_24h = {r['model']: r for r in _q("""
@@ -859,6 +910,11 @@ def get_data(f: dict) -> dict:
         events_log=events_log,
         activity=activity,
         gen_health=gen_health,
+        cur_dd=cur_dd,
+        pnl_today=_pnl_today,
+        pnl_week=_pnl_week,
+        rolling_wr=rolling_wr,
+        alert_event=alert_event,
         ts=int(time.time()),
     )
 
@@ -1673,12 +1729,14 @@ def _render_summary_pane(d: dict, f: dict, notice: str) -> str:
     <div class="card-val" style="color:{wr_color}">{d['wr']:.1f}%</div>
     <div class="wr-bar"><div class="wr-fill" style="width:{d['wr']:.0f}%;background:{wr_color}"></div></div>
   </div>"""
+    _cur_dd_v = d.get('cur_dd', 0.0)
     agg_dd = f"""
   <div class="card">
-    <div class="card-lbl">Max Drawdown &mdash; Combined &#8377;{5*START:,.0f}</div>
-    <div class="card-val {'neg' if d['max_dd']>5 else 'warn' if d['max_dd']>2 else 'pos'}">
-      -{d['max_dd']:.2f}%</div>
-    <div class="card-sub neu">Open positions: {len(d['positions'])}</div>
+    <div class="card-lbl">Drawdown &mdash; Combined &#8377;{5*START:,.0f}</div>
+    <div class="card-val {'neg' if _cur_dd_v>5 else 'warn' if _cur_dd_v>2 else 'pos'}">
+      -{_cur_dd_v:.2f}%</div>
+    <div class="card-sub neu">Current &nbsp;&nbsp;Max: <span class="{'neg' if d['max_dd']>5 else 'warn' if d['max_dd']>2 else 'neu'}">-{d['max_dd']:.2f}%</span>
+      &nbsp;&nbsp;Positions: {len(d['positions'])}</div>
   </div>"""
 
     cards = (model_cards +
@@ -1865,7 +1923,95 @@ def _render_summary_pane(d: dict, f: dict, notice: str) -> str:
             '</div></div>'
         )
 
-    return notice + quality_notice + _render_gen_health(d) + cards + pos_html + hist_html + recent_html
+    # ── Alert banner ──────────────────────────────────────────────────────────
+    alert_ev = d.get('alert_event')
+    if alert_ev:
+        _etype = str(alert_ev.get('event_type', '')).lower()
+        _emsg  = str(alert_ev.get('message', '')).replace('_', ' ')
+        if len(_emsg) > 120: _emsg = _emsg[:117] + '...'
+        _alert_bg = '#ffebe6' if 'halt' in _etype or 'red' in _etype else (
+                    '#fffae6' if 'orange' in _etype else '#e3fcef')
+        _alert_bd = '#ff5630' if 'halt' in _etype or 'red' in _etype else (
+                    '#ffe380' if 'orange' in _etype else '#57d9a3')
+        _alert_icon = '🔴' if 'halt' in _etype or 'red' in _etype else (
+                      '🟠' if 'orange' in _etype else '🟡')
+        alert_banner = f"""
+<div style="background:{_alert_bg};border:1.5px solid {_alert_bd};border-radius:6px;
+            padding:9px 14px;margin-bottom:12px;font-size:.82rem;color:#172b4d">
+  <strong>{_alert_icon} {alert_ev.get('event_type','').replace('_',' ').title()}</strong>
+  &nbsp;·&nbsp;{_emsg}
+  &nbsp;<span class="tag">{_ts(alert_ev.get('created_at',0))}</span>
+</div>"""
+    else:
+        alert_banner = ''
+
+    # ── P&L headline strip ────────────────────────────────────────────────────
+    _pt = d.get('pnl_today', 0.0)
+    _pw = d.get('pnl_week',  0.0)
+    _pa = d.get('gross', 0.0)
+    pnl_strip = f"""
+<div style="display:flex;gap:0;border:1px solid #dfe1e6;border-radius:8px;
+            overflow:hidden;margin-bottom:14px;font-size:.8rem">
+  <div style="flex:1;padding:10px 16px;border-right:1px solid #dfe1e6">
+    <div style="color:#6b778c;margin-bottom:2px;font-size:.72rem;text-transform:uppercase;letter-spacing:.04em">24H P&amp;L</div>
+    <div style="font-size:1.15rem;font-weight:700" class="{_gain(_pt)}">{_inr(_pt)}</div>
+  </div>
+  <div style="flex:1;padding:10px 16px;border-right:1px solid #dfe1e6">
+    <div style="color:#6b778c;margin-bottom:2px;font-size:.72rem;text-transform:uppercase;letter-spacing:.04em">7-Day P&amp;L</div>
+    <div style="font-size:1.15rem;font-weight:700" class="{_gain(_pw)}">{_inr(_pw)}</div>
+  </div>
+  <div style="flex:1;padding:10px 16px;border-right:1px solid #dfe1e6">
+    <div style="color:#6b778c;margin-bottom:2px;font-size:.72rem;text-transform:uppercase;letter-spacing:.04em">All-time Gross</div>
+    <div style="font-size:1.15rem;font-weight:700" class="{_gain(_pa)}">{_inr(_pa)}</div>
+  </div>
+  <div style="flex:1;padding:10px 16px">
+    <div style="color:#6b778c;margin-bottom:2px;font-size:.72rem;text-transform:uppercase;letter-spacing:.04em">Current Drawdown</div>
+    <div style="font-size:1.15rem;font-weight:700" class="{'neg' if d.get('cur_dd',0)>5 else 'warn' if d.get('cur_dd',0)>2 else 'pos'}">-{d.get('cur_dd',0.0):.2f}%</div>
+  </div>
+</div>"""
+
+    # ── Rolling WR block status ───────────────────────────────────────────────
+    rwr = d.get('rolling_wr', {})
+    rwr_rows = ''
+    for (_rms, _rdir), _rv in sorted(rwr.items()):
+        _rwr_wr  = _rv.get('wr')
+        _rwr_n   = _rv.get('n', 0)
+        _blocked = _rv.get('blocked', False)
+        if _rwr_wr is None:
+            _wr_str  = '<span class="neu">—</span>'
+            _bar_str = ''
+            _status_str = f'<span class="tag">Insufficient history ({_rwr_n}&lt;10)</span>'
+        else:
+            _wr_pct = _rwr_wr * 100
+            _bar_color = '#ff5630' if _blocked else ('#36b37e' if _wr_pct >= 50 else '#f59e0b')
+            _wr_str = f'<span style="font-weight:700;color:{_bar_color}">{_wr_pct:.1f}%</span>'
+            _bar_str = (f'<div style="height:5px;width:{min(_wr_pct,100):.0f}%;'
+                        f'background:{_bar_color};border-radius:2px;margin-top:2px"></div>')
+            _status_str = (f'<span style="color:#ff5630;font-weight:600">⛔ Blocked</span>'
+                           if _blocked else '<span style="color:#36b37e">&#10003; Clear</span>')
+        rwr_rows += f"""<tr>
+  <td>{_model(_rms)}</td>
+  <td>{_dir(_rdir)}</td>
+  <td>{_wr_str} {_bar_str}<span class="tag" style="margin-left:4px">last {_rwr_n}</span></td>
+  <td>{_status_str}</td>
+</tr>"""
+
+    if rwr_rows:
+        rwr_html = f"""
+<div class="section" style="margin-bottom:12px">
+  <div class="section-hdr">Rolling Win-Rate Block
+    <span class="tag" style="font-size:.67rem;text-transform:none;font-weight:400">
+      &nbsp;Custom model safety gate — blocks when last-15 WR &lt; 40%
+    </span>
+  </div>
+  <table style="width:auto"><thead>
+    <tr><th>Model</th><th>Direction</th><th style="min-width:160px">Rolling WR (last 15)</th><th>Status</th></tr>
+  </thead><tbody>{rwr_rows}</tbody></table>
+</div>"""
+    else:
+        rwr_html = ''
+
+    return notice + quality_notice + alert_banner + pnl_strip + _render_gen_health(d) + rwr_html + cards + pos_html + hist_html + recent_html
 
 
 # ── Tab 2: Analysis pane ──────────────────────────────────────────────────────
@@ -2039,6 +2185,13 @@ def _render_analysis_pane(d: dict, f: dict) -> str:
     <span class="tag" style="font-size:.67rem;text-transform:none;font-weight:400">
       Directional accuracy per confidence band (resolved signals only)
     </span>
+  </div>
+  <div style="background:#fffae6;border:1px solid #ffe380;border-radius:5px;
+              padding:7px 12px;margin:0 0 10px;font-size:.76rem;color:#172b4d">
+    <strong>&#9888; Calibration note:</strong>
+    Foundation models (Mini, Base) show an <em>inverse</em> correlation between confidence and accuracy —
+    higher confidence does NOT mean higher quality for these models. Only the Custom model has a positive correlation.
+    Do not use confidence as a signal filter for Mini/Base.
   </div>
   <div style="overflow-x:auto"><table>
     <thead><tr>{hdr}</tr></thead>
