@@ -1210,7 +1210,9 @@ class RiskCheck:
           24H move was positive but intraday swings kept body/range < 30%.
           (1) Daily gate: net close > open by >0.1% (last 24H) → proceed; else block.
               Relaxed from strict 30% body/range to net direction (2026-08-25).
-          (2) RVOL 0.75x–1.50x gate: same band proven on shorts (WR=95%, n=20).
+          (2) RVOL lower bound ≥0.75x: validated on shorts (WR=31% below it, n=16).
+              Upper bound removed — high-volume days are strong trend days; no
+              empirical basis for blocking them on longs. (2026-08-28)
               Fail open (None) if RVOL unavailable — never block on missing data.
 
         SHORTS — two-gate filter:
@@ -1360,10 +1362,10 @@ class RiskCheck:
                     f'is {daily_dir} (need net close>open >0.1%). '
                     f'v6 relaxed from 30% body/range gate. (2026-08-25)'
                 )
-            if rvol is not None and not (0.75 <= rvol <= 1.50):
+            if rvol is not None and rvol < 0.75:
                 return (
-                    f'custom_long_rvol_gate: RVOL={rvol:.2f}x outside '
-                    f'0.75–1.50x band on up daily. (2026-08-23)'
+                    f'custom_long_rvol_gate: RVOL={rvol:.2f}x below 0.75x '
+                    f'minimum on up daily — noise candle. (2026-08-23)'
                 )
             return None   # APPROVED: net-up daily + volume confirmed (or no data)
 
