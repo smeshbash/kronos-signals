@@ -215,8 +215,8 @@ REGIME_MODELS          = frozenset({'custom'})  # models subject to regime filte
 #   55%+   rolling WR → next signal WR = 65.7% (n=35)
 # Applied to custom model only — foundation model rolling WR history too thin.
 # Fails open when fewer than ROLLING_WR_MIN_N resolved signals exist.
-ROLLING_WR_WINDOW    = 15    # resolved signals to evaluate
-ROLLING_WR_MIN_N     = 10    # min resolved signals needed to fire (else fail open)
+ROLLING_WR_WINDOW    = 10    # resolved signals to evaluate
+ROLLING_WR_MIN_N     = 7     # min resolved signals needed to fire (else fail open)
 ROLLING_WR_THRESHOLD = 0.40  # WR below this → block
 ROLLING_WR_MODELS    = frozenset({'custom'})
 
