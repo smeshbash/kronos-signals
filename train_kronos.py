@@ -52,7 +52,7 @@ from kronos_model import KronosForecaster, SEQ_LEN, PRED_LEN, N_CHANNELS
 # ── Constants ─────────────────────────────────────────────────────────────────
 SYMBOLS    = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'XRP/USDT']
 TIMEFRAME  = '4h'
-# Fetch ~2.5 years of 4H candles (2.5y × 365d × 6 candles/day ≈ 5475 candles)
+# Fetch ~5 years of 4H candles (5y × 365d × 6 candles/day ≈ 10950 candles)
 MAX_CANDLES_PER_FETCH = 1000   # Binance API limit per call
 TARGET_CANDLES        = 11000  # ~5 years
 SINCE_DATE_DAYS       = 1826   # fetch this many days of history (~5y, captures 2022 bear market)
@@ -110,11 +110,17 @@ class OHLCVDataset(Dataset):
 def _fetch_ohlcv_paginated(exchange, symbol: str, timeframe: str, target: int) -> np.ndarray:
     """Fetch up to `target` 4H candles from Binance via CCXT pagination.
 
+    Paginates forward from SINCE_DATE_DAYS ago, stopping only when the last
+    fetched candle reaches the present (not on a partial batch — partial batches
+    can occur mid-history due to gaps and would previously cut the fetch short).
+    If more than `target` candles are collected, the most recent ones are kept,
+    so recent market data is always represented in training.
+
     Returns: [T, 5] float32 array — columns: open, high, low, close, volume
     """
     all_candles = []
-    # Start from approx SINCE_DATE_DAYS ago
-    since_ms = int((time.time() - SINCE_DATE_DAYS * 86400) * 1000)
+    since_ms   = int((time.time() - SINCE_DATE_DAYS * 86400) * 1000)
+    cutoff_ms  = int(time.time() * 1000) - 4 * 3600 * 1000  # 1 bar before now
 
     while len(all_candles) < target:
         try:
@@ -133,17 +139,19 @@ def _fetch_ohlcv_paginated(exchange, symbol: str, timeframe: str, target: int) -
         all_candles.extend(candles)
         last_ts = candles[-1][0]
 
-        if len(candles) < MAX_CANDLES_PER_FETCH:
-            break   # no more data
+        if last_ts >= cutoff_ms:
+            break  # reached the present — stop
 
-        # Advance since_ms past the last candle
         since_ms = last_ts + 1
         time.sleep(exchange.rateLimit / 1000)
 
     if not all_candles:
         return np.zeros((0, 5), dtype=np.float32)
 
-    # columns: timestamp, open, high, low, close, volume
+    # Prefer the most recent `target` candles — recent market data takes priority
+    if len(all_candles) > target:
+        all_candles = all_candles[-target:]
+
     arr = np.array([[c[1], c[2], c[3], c[4], c[5]] for c in all_candles], dtype=np.float32)
     return arr
 
