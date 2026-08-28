@@ -208,11 +208,12 @@ def build_datasets(arrays: list):
 # ── Training loop ─────────────────────────────────────────────────────────────
 
 def train(
-    epochs:   int   = EPOCHS,
-    batch:    int   = BATCH_SIZE,
-    lr:       float = LR,
-    wd:       float = WEIGHT_DECAY,
-    patience: int   = EARLY_STOP_PATIENCE,
+    epochs:         int   = EPOCHS,
+    batch:          int   = BATCH_SIZE,
+    lr:             float = LR,
+    wd:             float = WEIGHT_DECAY,
+    patience:       int   = EARLY_STOP_PATIENCE,
+    balance_weight: float = 0.05,   # penalise batch-level directional bias
 ) -> None:
 
     # ── Setup ──
@@ -267,6 +268,12 @@ def train(
             optimizer.zero_grad()
             pred = model(x)
             loss = criterion(pred, y)
+            # Directional balance penalty — penalise batch mean bias in final
+            # predicted close (normalised space). Keeps model from always
+            # predicting "up" when training data is mostly bullish.
+            if balance_weight > 0:
+                pred_bias = pred[:, -1, 3].mean()   # mean final close, norm space
+                loss = loss + balance_weight * pred_bias.abs()
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
@@ -304,9 +311,45 @@ def train(
                 break
 
     # ── Save final model ──
-    print(f'\nLoading best weights from epoch {best_epoch}...')
+    import shutil
+    ts = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+
+    # Backup CURRENT model before overwriting — rollback point
+    if os.path.exists(MODEL_PATH):
+        pre_bak = os.path.join(MODELS_DIR, f'kronos_model_pre_retrain_{ts}.pt')
+        shutil.copy(MODEL_PATH, pre_bak)
+        print(f'\nPre-retrain backup:  {pre_bak}')
+        print(f'  (rollback: cp {pre_bak} {MODEL_PATH}  then restart M04)')
+
+    print(f'Loading best weights from epoch {best_epoch}...')
     model.load_state_dict(torch.load(MODEL_PATH + '.best.pt', map_location='cpu'))
     model.eval().cpu()
+
+    # ── Directional bias diagnostic ───────────────────────────────────────────
+    # Count what % of val-set windows the retrained model would call 'long'
+    # (predicted final close > last known close in normalised space).
+    # A healthy model should be 45–55% long. >65% = structural long bias.
+    print('\nRunning directional bias diagnostic on val set...')
+    diag_model = model.to(device)
+    diag_model.eval()
+    long_n = total_n = 0
+    with torch.no_grad():
+        for x, y in val_loader:
+            x = x.to(device)
+            pred = diag_model(x)
+            # In RevIN normalised space: pred[:, -1, 3] > x[:, -1, 3] → predicted up
+            long_n  += (pred[:, -1, 3] > x[:, -1, 3]).sum().item()
+            total_n += x.size(0)
+    diag_model.cpu()
+    long_pct = long_n / total_n * 100 if total_n else 50.0
+    print(f'  LONG:  {long_pct:.1f}%  |  SHORT: {100 - long_pct:.1f}%  (n={total_n})')
+    if long_pct > 65:
+        print('  ⚠  Strong long bias — model may underfire shorts in bear markets.')
+        print('     Consider re-running with --balance-weight 0.10 or 0.15')
+    elif long_pct > 57:
+        print('  ⚠  Mild long bias — monitor short signal rate after deployment.')
+    else:
+        print('  ✓  Directional balance healthy.')
 
     # Try TorchScript first (preferred — Module 4 tries jit.load first)
     saved_as = 'unknown'
@@ -319,10 +362,8 @@ def train(
         torch.save(model, MODEL_PATH)
         saved_as = 'full model (torch.save)'
 
-    # Timestamped backup
-    ts  = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+    # Post-training timestamped backup
     bak = os.path.join(MODELS_DIR, f'kronos_model_{ts}.pt')
-    import shutil
     shutil.copy(MODEL_PATH, bak)
 
     # Clean up temp best-weights file
@@ -341,10 +382,12 @@ def train(
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train KronosForecaster')
-    parser.add_argument('--epochs',   type=int,   default=EPOCHS,      help='Max training epochs')
-    parser.add_argument('--batch',    type=int,   default=BATCH_SIZE,  help='Batch size')
-    parser.add_argument('--lr',       type=float, default=LR,          help='Initial learning rate')
-    parser.add_argument('--patience', type=int,   default=EARLY_STOP_PATIENCE, help='Early stopping patience')
+    parser.add_argument('--epochs',         type=int,   default=EPOCHS,               help='Max training epochs')
+    parser.add_argument('--batch',          type=int,   default=BATCH_SIZE,           help='Batch size')
+    parser.add_argument('--lr',             type=float, default=LR,                   help='Initial learning rate')
+    parser.add_argument('--patience',       type=int,   default=EARLY_STOP_PATIENCE,  help='Early stopping patience')
+    parser.add_argument('--balance-weight', type=float, default=0.05,
+                        help='Penalty weight for directional bias (0=off, 0.05=default, 0.15=strong)')
     args = parser.parse_args()
 
     train(
@@ -352,4 +395,5 @@ if __name__ == '__main__':
         batch=args.batch,
         lr=args.lr,
         patience=args.patience,
+        balance_weight=args.balance_weight,
     )
