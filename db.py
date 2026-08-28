@@ -409,6 +409,11 @@ def init_db() -> None:
         # Positive = price went up. Compare sign against direction for hit/miss.
         # NULL until resolved.
         "ALTER TABLE signals ADD COLUMN actual_return_pct REAL DEFAULT NULL",
+        # 4H directional resolution — filled 4H after signal_timestamp (not 24H).
+        # Used by rolling WR block for faster feedback (4H vs 24H per signal).
+        # = (close_at_signal+4H - close_at_signal) / close_at_signal × 100
+        # NULL until the 4H candle after the signal is available.
+        "ALTER TABLE signals ADD COLUMN actual_return_4h_pct REAL DEFAULT NULL",
         # Regime version stamp on portfolio snapshots — mirrors SIGNAL_REGIME_VERSION.
         # NULL on snapshots written before v5 (these are the v1–v4 archive).
         # v5+ snapshots have an explicit integer so dashboard/PM queries can

@@ -1291,9 +1291,9 @@ class RiskCheck:
         try:
             with get_connection() as conn:
                 rows = conn.execute(
-                    """SELECT actual_return_pct, direction FROM signals
+                    """SELECT actual_return_4h_pct, direction FROM signals
                        WHERE model_source=? AND direction=?
-                         AND actual_return_pct IS NOT NULL
+                         AND actual_return_4h_pct IS NOT NULL
                          AND regime_version=?
                        ORDER BY signal_timestamp DESC LIMIT ?""",
                     (model_source, direction, SIGNAL_REGIME_VERSION, ROLLING_WR_WINDOW),
@@ -1302,8 +1302,8 @@ class RiskCheck:
                 return None   # insufficient history — fail open
             correct = sum(
                 1 for r in rows
-                if (r['direction'] == 'long'  and float(r['actual_return_pct']) > 0) or
-                   (r['direction'] == 'short' and float(r['actual_return_pct']) < 0)
+                if (r['direction'] == 'long'  and float(r['actual_return_4h_pct']) > 0) or
+                   (r['direction'] == 'short' and float(r['actual_return_4h_pct']) < 0)
             )
             wr = correct / len(rows)
             if wr < ROLLING_WR_THRESHOLD:
@@ -2093,74 +2093,100 @@ class RiskCheck:
 
     def _resolve_matured_signals(self) -> None:
         """
-        Populate actual_return_pct for every signal that has passed its prediction
-        horizon and has OHLCV data available for resolution.
+        Populate actual_return_4h_pct and actual_return_pct for matured signals.
 
-        actual_return_pct = (close_at_horizon - close_at_signal) / close_at_signal × 100
+        actual_return_4h_pct — filled 4H after the signal, used by the rolling WR
+          block for fast feedback. 4H resolution means the WR window fills 6× faster
+          than the 24H horizon, so the safety block reacts within hours not days.
 
-        Runs at the end of every hourly risk-check cycle — idempotent, skips signals
-        that are already resolved or whose horizon candle isn't in the DB yet.
-        Excludes quality-flagged signals (corrupted / pre-fix data).
+        actual_return_pct — filled at the signal's full horizon (default 24H), used
+          for P&L analysis, calibration, and directional accuracy benchmarking.
+
+        Both columns are idempotent: already-resolved signals are skipped. Runs at
+        the end of every hourly risk-check cycle. Excludes quality-flagged signals.
         """
         now = int(time.time())
-        resolved_count = 0
+        resolved_4h  = 0
+        resolved_24h = 0
 
         try:
             with get_connection() as conn:
                 pending = conn.execute(
-                    """SELECT id, symbol, signal_timestamp, horizon
+                    """SELECT id, symbol, signal_timestamp, horizon,
+                              actual_return_pct, actual_return_4h_pct
                        FROM signals
-                       WHERE actual_return_pct IS NULL
-                         AND quality_flag      IS NULL
-                         AND status            NOT IN ('pending')"""
+                       WHERE (actual_return_pct IS NULL OR actual_return_4h_pct IS NULL)
+                         AND quality_flag IS NULL
+                         AND status NOT IN ('pending')"""
                 ).fetchall()
 
                 for sig in pending:
-                    sig_ts  = int(sig['signal_timestamp'])
-                    hz_str  = str(sig['horizon'] or '24h')
-                    m       = re.match(r'(\d+)\s*[Hh]', hz_str)
-                    hz_secs = int(m.group(1)) * 3600 if m else 86400
+                    sig_ts = int(sig['signal_timestamp'])
+                    sym    = sig['symbol']
 
-                    if now < sig_ts + hz_secs:
-                        continue   # horizon hasn't elapsed yet
-
-                    sym = sig['symbol']
+                    # Fetch close at signal time once — shared by both resolutions
                     close_at = conn.execute(
                         """SELECT close FROM ohlcv
                            WHERE symbol=? AND timeframe='4h' AND timestamp<=?
                            ORDER BY timestamp DESC LIMIT 1""",
                         (sym, sig_ts),
                     ).fetchone()
-                    close_after = conn.execute(
-                        """SELECT close FROM ohlcv
-                           WHERE symbol=? AND timeframe='4h' AND timestamp>=?
-                           ORDER BY timestamp ASC LIMIT 1""",
-                        (sym, sig_ts + hz_secs),
-                    ).fetchone()
+                    if not close_at or float(close_at['close']) <= 0:
+                        continue
 
-                    if not close_at or not close_after or float(close_at['close']) <= 0:
-                        continue   # OHLCV candle not yet available
+                    base_close = float(close_at['close'])
 
-                    actual = round(
-                        (float(close_after['close']) - float(close_at['close']))
-                        / float(close_at['close']) * 100,
-                        4,
-                    )
-                    conn.execute(
-                        "UPDATE signals SET actual_return_pct=? WHERE id=?",
-                        (actual, int(sig['id'])),
-                    )
-                    resolved_count += 1
+                    # ── 4H directional resolution ─────────────────────────────
+                    if sig['actual_return_4h_pct'] is None and now >= sig_ts + 4 * 3600:
+                        close_4h = conn.execute(
+                            """SELECT close FROM ohlcv
+                               WHERE symbol=? AND timeframe='4h' AND timestamp>=?
+                               ORDER BY timestamp ASC LIMIT 1""",
+                            (sym, sig_ts + 4 * 3600),
+                        ).fetchone()
+                        if close_4h:
+                            conn.execute(
+                                "UPDATE signals SET actual_return_4h_pct=? WHERE id=?",
+                                (round((float(close_4h['close']) - base_close)
+                                       / base_close * 100, 4),
+                                 int(sig['id'])),
+                            )
+                            resolved_4h += 1
+
+                    # ── Full horizon resolution (24H default) ─────────────────
+                    if sig['actual_return_pct'] is None:
+                        hz_str  = str(sig['horizon'] or '24h')
+                        m       = re.match(r'(\d+)\s*[Hh]', hz_str)
+                        hz_secs = int(m.group(1)) * 3600 if m else 86400
+
+                        if now < sig_ts + hz_secs:
+                            continue
+
+                        close_after = conn.execute(
+                            """SELECT close FROM ohlcv
+                               WHERE symbol=? AND timeframe='4h' AND timestamp>=?
+                               ORDER BY timestamp ASC LIMIT 1""",
+                            (sym, sig_ts + hz_secs),
+                        ).fetchone()
+                        if close_after:
+                            conn.execute(
+                                "UPDATE signals SET actual_return_pct=? WHERE id=?",
+                                (round((float(close_after['close']) - base_close)
+                                       / base_close * 100, 4),
+                                 int(sig['id'])),
+                            )
+                            resolved_24h += 1
 
         except Exception as exc:
             log_event(MODULE, 'warning', 'signal_resolution_error',
                       f'Signal resolution failed: {exc}', {'error': str(exc)})
             return
 
-        if resolved_count:
+        total = resolved_4h + resolved_24h
+        if total:
             log_event(MODULE, 'info', 'signal_resolution',
-                      f'Resolved actual_return_pct for {resolved_count} matured signal(s)',
-                      {'resolved': resolved_count})
+                      f'Resolved {resolved_4h} 4H + {resolved_24h} 24H signal outcomes',
+                      {'resolved_4h': resolved_4h, 'resolved_24h': resolved_24h})
 
 
 # ── Standalone runner ─────────────────────────────────────────────────────────

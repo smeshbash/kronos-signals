@@ -827,9 +827,9 @@ def get_data(f: dict) -> dict:
     for _rwr_ms in ['custom']:
         for _rwr_dir in ['long', 'short']:
             _rwr_rows = _q(
-                """SELECT actual_return_pct, direction FROM signals
+                """SELECT actual_return_4h_pct, direction FROM signals
                    WHERE (model_source=? OR (? = 'custom' AND model_source IS NULL))
-                     AND direction=? AND actual_return_pct IS NOT NULL
+                     AND direction=? AND actual_return_4h_pct IS NOT NULL
                      AND COALESCE(regime_version, 1) = ?
                    ORDER BY signal_timestamp DESC LIMIT ?""",
                 (_rwr_ms, _rwr_ms, _rwr_dir, f.get('regime', SIGNAL_REGIME_VERSION), _ROLLING_WR_WINDOW)
@@ -838,8 +838,8 @@ def get_data(f: dict) -> dict:
             if _rwr_n >= _ROLLING_WR_MIN_N:
                 _rwr_correct = sum(
                     1 for r in _rwr_rows
-                    if (r['direction'] == 'long'  and _f(r['actual_return_pct']) > 0) or
-                       (r['direction'] == 'short' and _f(r['actual_return_pct']) < 0)
+                    if (r['direction'] == 'long'  and _f(r['actual_return_4h_pct']) > 0) or
+                       (r['direction'] == 'short' and _f(r['actual_return_4h_pct']) < 0)
                 )
                 _rwr_wr = _rwr_correct / _rwr_n
                 rolling_wr[(_rwr_ms, _rwr_dir)] = {
