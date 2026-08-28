@@ -1271,15 +1271,18 @@ class RiskCheck:
         return None   # APPROVED: RVOL in band (or no data) + non-bullish daily
 
     @staticmethod
-    @staticmethod
     def _check_rolling_wr_block(model_source: str, direction: str) -> Optional[str]:
         """
         Rolling win-rate suppression. Returns rejection reason or None.
 
         Computes WR over the last ROLLING_WR_WINDOW resolved signals for this
-        model_source + direction (all symbols combined — per-symbol sample too thin).
+        model_source + direction + current regime_version (all symbols combined —
+        per-symbol sample too thin). Scoped to current regime so that signals from
+        a prior regime (different model, different market conditions) do not
+        contaminate the rolling window. A regime bump is a clean slate.
+
         Blocks if WR < ROLLING_WR_THRESHOLD. Fails open if fewer than
-        ROLLING_WR_MIN_N resolved signals exist.
+        ROLLING_WR_MIN_N resolved signals exist in the current regime.
 
         Validated 2026-06-13: sub-40% rolling WR → 13.4% actual WR on next 97 signals.
         """
@@ -1291,8 +1294,9 @@ class RiskCheck:
                     """SELECT actual_return_pct, direction FROM signals
                        WHERE model_source=? AND direction=?
                          AND actual_return_pct IS NOT NULL
+                         AND regime_version=?
                        ORDER BY signal_timestamp DESC LIMIT ?""",
-                    (model_source, direction, ROLLING_WR_WINDOW),
+                    (model_source, direction, SIGNAL_REGIME_VERSION, ROLLING_WR_WINDOW),
                 ).fetchall()
             if len(rows) < ROLLING_WR_MIN_N:
                 return None   # insufficient history — fail open
@@ -1305,7 +1309,8 @@ class RiskCheck:
             if wr < ROLLING_WR_THRESHOLD:
                 return (
                     f'rolling_wr_block: {model_source} {direction} '
-                    f'rolling WR={wr*100:.1f}% over last {len(rows)} resolved signals '
+                    f'rolling WR={wr*100:.1f}% over last {len(rows)} resolved '
+                    f'v{SIGNAL_REGIME_VERSION} signals '
                     f'below {ROLLING_WR_THRESHOLD*100:.0f}% threshold — suppressed'
                 )
             return None
