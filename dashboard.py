@@ -811,8 +811,8 @@ def get_data(f: dict) -> dict:
                          " AND exit_timestamp >= ?", (_now_ts - 7 * 86400,)) or [{'g': 0}])[0]['g'])
 
     # Rolling WR block status (custom model longs + shorts — mirrors risk_check logic)
-    _ROLLING_WR_WINDOW    = 15
-    _ROLLING_WR_MIN_N     = 10
+    _ROLLING_WR_WINDOW    = 10
+    _ROLLING_WR_MIN_N     = 7
     _ROLLING_WR_THRESHOLD = 0.40
     rolling_wr: dict = {}
     for _rwr_ms in ['custom']:
@@ -2001,11 +2001,11 @@ def _render_summary_pane(d: dict, f: dict, notice: str) -> str:
 <div class="section" style="margin-bottom:12px">
   <div class="section-hdr">Rolling Win-Rate Block
     <span class="tag" style="font-size:.67rem;text-transform:none;font-weight:400">
-      &nbsp;Custom model safety gate — blocks when last-15 WR &lt; 40%
+      &nbsp;Custom model safety gate — blocks when last-10 WR &lt; 40% (min 7 signals)
     </span>
   </div>
   <table style="width:auto"><thead>
-    <tr><th>Model</th><th>Direction</th><th style="min-width:160px">Rolling WR (last 15)</th><th>Status</th></tr>
+    <tr><th>Model</th><th>Direction</th><th style="min-width:160px">Rolling WR (last 10)</th><th>Status</th></tr>
   </thead><tbody>{rwr_rows}</tbody></table>
 </div>"""
     else:
