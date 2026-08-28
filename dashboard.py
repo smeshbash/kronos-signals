@@ -801,14 +801,23 @@ def get_data(f: dict) -> dict:
         ORDER BY cnt DESC LIMIT 12
     """, (int(time.time()) - 86400,))
 
-    # P&L over last 24H and last 7 days (unfiltered — always show real totals)
+    # P&L over last 24H and last 7 days — scoped to selected regime
     _now_ts    = int(time.time())
-    _pnl_today = _f((_q("SELECT COALESCE(SUM(pnl_gross),0) AS g FROM trades"
-                         " WHERE status='closed' AND quality_flag IS NULL"
-                         " AND exit_timestamp >= ?", (_now_ts - 86400,)) or [{'g': 0}])[0]['g'])
-    _pnl_week  = _f((_q("SELECT COALESCE(SUM(pnl_gross),0) AS g FROM trades"
-                         " WHERE status='closed' AND quality_flag IS NULL"
-                         " AND exit_timestamp >= ?", (_now_ts - 7 * 86400,)) or [{'g': 0}])[0]['g'])
+    _pnl_regime = f.get('regime', SIGNAL_REGIME_VERSION)
+    _pnl_today = _f((_q(
+        "SELECT COALESCE(SUM(t.pnl_gross),0) AS g FROM trades t"
+        " JOIN signals s ON s.id = t.signal_id"
+        " WHERE t.status='closed' AND t.quality_flag IS NULL"
+        " AND t.exit_timestamp >= ?"
+        " AND COALESCE(s.regime_version, 1) = ?",
+        (_now_ts - 86400, _pnl_regime)) or [{'g': 0}])[0]['g'])
+    _pnl_week  = _f((_q(
+        "SELECT COALESCE(SUM(t.pnl_gross),0) AS g FROM trades t"
+        " JOIN signals s ON s.id = t.signal_id"
+        " WHERE t.status='closed' AND t.quality_flag IS NULL"
+        " AND t.exit_timestamp >= ?"
+        " AND COALESCE(s.regime_version, 1) = ?",
+        (_now_ts - 7 * 86400, _pnl_regime)) or [{'g': 0}])[0]['g'])
 
     # Rolling WR block status (custom model longs + shorts — mirrors risk_check logic)
     _ROLLING_WR_WINDOW    = 10
@@ -821,8 +830,9 @@ def get_data(f: dict) -> dict:
                 """SELECT actual_return_pct, direction FROM signals
                    WHERE (model_source=? OR (? = 'custom' AND model_source IS NULL))
                      AND direction=? AND actual_return_pct IS NOT NULL
+                     AND COALESCE(regime_version, 1) = ?
                    ORDER BY signal_timestamp DESC LIMIT ?""",
-                (_rwr_ms, _rwr_ms, _rwr_dir, _ROLLING_WR_WINDOW)
+                (_rwr_ms, _rwr_ms, _rwr_dir, f.get('regime', SIGNAL_REGIME_VERSION), _ROLLING_WR_WINDOW)
             )
             _rwr_n = len(_rwr_rows)
             if _rwr_n >= _ROLLING_WR_MIN_N:
