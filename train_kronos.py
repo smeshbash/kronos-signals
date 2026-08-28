@@ -4,7 +4,7 @@ Trains KronosForecaster on historical 4H OHLCV data and saves the model.
 
 Data source: Binance (deepest 4H history for all 5 Kronos assets)
   BTC/USDT, ETH/USDT, SOL/USDT, BNB/USDT, XRP/USDT
-  Fetches from SINCE_DATE back to now (~2+ years).
+  Fetches from SINCE_DATE back to now (~5 years, captures 2022 bear market).
 
 Training:
   - Instance normalisation (RevIN) per sliding window — matches Module 4 exactly
@@ -54,8 +54,8 @@ SYMBOLS    = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'XRP/USDT']
 TIMEFRAME  = '4h'
 # Fetch ~2.5 years of 4H candles (2.5y × 365d × 6 candles/day ≈ 5475 candles)
 MAX_CANDLES_PER_FETCH = 1000   # Binance API limit per call
-TARGET_CANDLES        = 5500   # ~2.5 years
-SINCE_DATE_DAYS       = 915    # fetch this many days of history
+TARGET_CANDLES        = 11000  # ~5 years
+SINCE_DATE_DAYS       = 1826   # fetch this many days of history (~5y, captures 2022 bear market)
 
 MODELS_DIR  = os.path.join(os.path.dirname(__file__), 'models')
 MODEL_PATH  = os.path.join(MODELS_DIR, 'kronos_model.pt')
@@ -213,7 +213,7 @@ def train(
     lr:             float = LR,
     wd:             float = WEIGHT_DECAY,
     patience:       int   = EARLY_STOP_PATIENCE,
-    balance_weight: float = 0.05,   # penalise batch-level directional bias
+    balance_weight: float = 0.0,    # penalise batch-level directional bias (disabled: data-balanced instead)
 ) -> None:
 
     # ── Setup ──
@@ -386,8 +386,8 @@ if __name__ == '__main__':
     parser.add_argument('--batch',          type=int,   default=BATCH_SIZE,           help='Batch size')
     parser.add_argument('--lr',             type=float, default=LR,                   help='Initial learning rate')
     parser.add_argument('--patience',       type=int,   default=EARLY_STOP_PATIENCE,  help='Early stopping patience')
-    parser.add_argument('--balance-weight', type=float, default=0.05,
-                        help='Penalty weight for directional bias (0=off, 0.05=default, 0.15=strong)')
+    parser.add_argument('--balance-weight', type=float, default=0.0,
+                        help='Penalty weight for directional bias (0=off — default now that data covers 2022 bear)')
     args = parser.parse_args()
 
     train(
