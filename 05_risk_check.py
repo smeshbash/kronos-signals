@@ -229,6 +229,17 @@ ROLLING_WR_MODELS    = frozenset({'custom'})
 RVOL_4H_CUTOFF_TS   = 1780704000   # 2026-06-06 00:00 UTC — first confirmed new-unit candle
 RVOL_4H_MIN_PERIODS = 5            # ~5 days of same-hour history needed to activate
 
+# base-4h short RVOL lower-bound confidence override.
+# Data: of 27 resolved high-conf (>=0.65) base-4h shorts, ALL were RVOL-blocked
+# (lower bound <0.75x). Their empirical WR=74.1%, avg_ret=-1.78% — genuine edge.
+# The 5 that actually executed (avg conf=0.336, RVOL in band) had WR=0%.
+# The lower bound was calibrated on undifferentiated data (all conf levels combined).
+# Conditioned on conf>=0.65, low-RVOL shorts show the same 73-75% WR as the whole
+# high-conf band. Upper bound (>1.50x) retained — extended-move risk is
+# confidence-independent. Daily-bullish gate also retained unchanged.
+# 2026-08-29
+BASE_4H_SHORT_RVOL_CONF_OVERRIDE = 0.65
+
 # Module-level cache: {symbol: (regime, expiry_unix_ts)}
 # Persists across signals within a single M5 run cycle; refreshed every 15 minutes.
 _regime_cache: dict = {}
@@ -452,7 +463,8 @@ class RiskCheck:
         #   On current data all RVOL 0.75-1.50x shorts are also non-bullish-daily.
         #   Daily gate adds defence against future regime shifts.
         if not rejection_reason:
-            _base_4h_block = RiskCheck._check_kronos_base_4h_filter(model_source, direction, symbol)
+            _base_4h_block = RiskCheck._check_kronos_base_4h_filter(
+                model_source, direction, symbol, confidence)
             if _base_4h_block:
                 rejection_reason = _base_4h_block
 
@@ -1195,6 +1207,7 @@ class RiskCheck:
         model_source: str,
         direction:    str,
         symbol:       str,
+        confidence:   float = 0.0,
     ) -> Optional[str]:
         """
         kronos-base-4h direction, volume, and synthetic-daily gate (2026-06-09).
@@ -1216,9 +1229,16 @@ class RiskCheck:
               Fail open (None) if RVOL unavailable — never block on missing data.
 
         SHORTS — two-gate filter:
-          (1) RVOL 0.75x–1.50x gate (primary):
-                RVOL < 0.75x:    WR=31.2%, EV=-Rs  20 (n=16) — noise, block
-                RVOL 0.75–1.50x: WR=95.0%, EV=+Rs 380 (n=20) — execute
+          (1) RVOL gate (primary):
+                RVOL < 0.75x:    WR=31.2%, EV=-Rs  20 (n=16) aggregate — block.
+                  Exception: confidence >= BASE_4H_SHORT_RVOL_CONF_OVERRIDE (0.65)
+                  bypasses the lower bound. Empirical: 27 resolved high-conf shorts
+                  were ALL RVOL-blocked; their WR=74.1%, avg_ret=-1.78% — genuine
+                  edge. The 5 that executed (avg conf=0.336, RVOL in band) had WR=0%.
+                  The lower bound calibration mixed all confidence levels; conditioned
+                  on >=0.65 it inverts. (2026-08-29)
+                RVOL 0.75–1.50x: WR=95.0%, EV=+Rs 380 (n=20) — execute.
+                RVOL > 1.50x:    extended move — block regardless of confidence.
                 Fail open (None) if RVOL unavailable — never block on missing data.
           (2) Skip daily-bullish (safety net):
                 Daily bullish:  WR=38.5%, EV=-Rs 97 (n=13) — block
@@ -1250,14 +1270,27 @@ class RiskCheck:
                 )
             return None   # APPROVED: bullish daily + RVOL confirmed (or no data)
 
-        # ── Shorts: RVOL 0.75x–1.50x gate ───────────────────────────────────
+        # ── Shorts: RVOL gate with confidence-based lower-bound override ─────
         rvol = RiskCheck._get_4h_rvol(symbol)
-        if rvol is not None and not (0.75 <= rvol <= 1.50):
-            return (
-                f'kronos_base_4h_short_rvol_gate: '
-                f'RVOL={rvol:.2f}x outside 0.75–1.50x band. '
-                f'<0.75x=noise candle (WR=31%), >1.50x=extended move. (2026-06-09)'
-            )
+        if rvol is not None:
+            if rvol > 1.50:
+                # Upper bound always enforced — extended move risk is
+                # confidence-independent.
+                return (
+                    f'kronos_base_4h_short_rvol_gate: '
+                    f'RVOL={rvol:.2f}x above 1.50x band — extended move. (2026-06-09)'
+                )
+            if rvol < 0.75 and confidence < BASE_4H_SHORT_RVOL_CONF_OVERRIDE:
+                # Lower bound bypassed when model is highly confident:
+                # high-conf low-RVOL shorts have WR=74.1% (n=27) despite
+                # aggregate low-RVOL WR=31% — the 31% is dominated by
+                # low-confidence signals. (2026-08-29)
+                return (
+                    f'kronos_base_4h_short_rvol_gate: '
+                    f'RVOL={rvol:.2f}x below 0.75x and conf={confidence:.3f} '
+                    f'< {BASE_4H_SHORT_RVOL_CONF_OVERRIDE} override threshold — '
+                    f'noise candle (WR=31% aggregate). (2026-06-09)'
+                )
 
         # ── Shorts: skip when synthetic daily is bullish ──────────────────────
         daily_state = RiskCheck._get_synthetic_daily_state(symbol)
@@ -1268,7 +1301,7 @@ class RiskCheck:
                 f'counter-trend short. Backtest WR=38.5% EV=-Rs97 (n=13). (2026-06-09)'
             )
 
-        return None   # APPROVED: RVOL in band (or no data) + non-bullish daily
+        return None   # APPROVED: RVOL pass (in band, or high-conf override, or no data) + non-bullish daily
 
     @staticmethod
     def _check_rolling_wr_block(model_source: str, direction: str) -> Optional[str]:
