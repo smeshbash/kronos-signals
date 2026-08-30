@@ -110,9 +110,15 @@ _DEFAULT_ATR_CONFIG: tuple[str, float, float, float] = (
 #   XRPUSD: HALTED — 0% WR, Rs 203/trade in fees, no viable combo
 #
 # kronos-mini-4h per-symbol config — tuned 2026-06-08 from 11/14/14/2 trade MFE/MAE analysis:
-#   ETHUSD: default (TP=2.0×, SL=1.5×) — already profitable +Rs 708 actual / +Rs 2,067 sim
-#   XRPUSD: default (TP=2.0×, SL=1.5×) — only 2 trades, re-evaluate at 10+
-#   BTCUSD: TP=2.00×, SL=0.25×  R:R=8.0:1  BE-WR=11.1%  (+Rs 711 sim; longs 14% WR, watch bias)
+#   ETHUSD: default (TP=2.0x, SL=1.5x) — already profitable +Rs 708 actual / +Rs 2,067 sim
+#   XRPUSD: SL widened 1.5x->2.0x (2026-08-30). v6 analysis (n=7 shorts): 85.7% 24H signal
+#     accuracy but 43% trade WR — 2/3 SL losses were premature stops (XRP spiked then
+#     reversed in correct direction). Aug 23 peak=+4.93% (SL hit), 24H actual=-0.291%;
+#     Aug 24 peak=+3.16% (SL hit), 24H actual=-2.297%. Both spikes below 2.0xATR threshold
+#     — would have survived and resolved as wins. TP stays 2.0x (R:R=1.0; BE-WR=50%;
+#     projected trade WR ~71% given 85.7% signal directional accuracy).
+#   BTCUSD: BLOCKED in risk_check (2026-08-30) — 0% trade WR, 12.5% signal WR (n=8).
+#     Per-symbol ATR config retained here but risk_check rejects before execution reaches it.
 #   BNBUSD: HALTED — no viable combo in grid; all 14 trades long in downtrend, -Rs 5,945
 _MODEL_SYMBOL_ATR_CONFIG: dict[tuple[str, str], tuple[str, float, float, float]] = {
     # kronos-mini (1H)
@@ -124,6 +130,7 @@ _MODEL_SYMBOL_ATR_CONFIG: dict[tuple[str, str], tuple[str, float, float, float]]
     ('kronos-base', 'ETHUSD'): ('1h', 1.00, 0.25, 1.0),
     # kronos-mini-4h (4H)
     ('kronos-mini-4h', 'BTCUSD'): ('4h', 2.00, 0.25, 1.0),
+    ('kronos-mini-4h', 'XRPUSD'): ('4h', 2.00, 2.00, 1.0),  # SL widened 1.5->2.0 (2026-08-30)
 }
 
 # Symbols halted per model — signals are rejected at execution without being executed.

@@ -1190,6 +1190,17 @@ class RiskCheck:
                 )
             return None   # APPROVED: net-up daily
 
+        # ── Shorts: BTCUSD blocked — model directionally wrong on BTC ───────
+        # v6 data: 10 SL, 0 TP on BTCUSD shorts. Signal-level directional
+        # accuracy 12.5% (n=8). Confirmed structurally wrong, not market-timing.
+        # (2026-08-30)
+        if symbol == 'BTCUSD':
+            return (
+                'kronos_mini_4h_short_btc_blocked: '
+                'BTCUSD short WR=0% trade (10 SL, 0 TP), signal WR=12.5% (n=8) '
+                'in v6 — model directionally wrong on BTC shorts. (2026-08-30)'
+            )
+
         # ── Shorts: skip when synthetic daily is bullish ──────────────────────
         daily_state = RiskCheck._get_synthetic_daily_state(symbol)
 
