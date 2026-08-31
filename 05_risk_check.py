@@ -1329,9 +1329,19 @@ class RiskCheck:
         ROLLING_WR_MIN_N resolved signals exist in the current regime.
 
         Validated 2026-06-13: sub-40% rolling WR → 13.4% actual WR on next 97 signals.
+
+        LONGS excluded for custom (2026-08-30): a 10-signal trailing-WR filter
+        is a lagging indicator — it fires right after a losing streak, which is
+        exactly when reversion is most likely. Pooled across all regime versions,
+        the 25 custom-long signals this gate blocked went on to score 72.0% WR
+        (4H, the gate's own horizon) / 96.0% WR (24H), avg return +0.56%/+1.64%
+        — the opposite of the gate's justification. Shorts show the expected
+        pattern (n=9: 44.4%/22.2% WR, avg -0.71%/-3.69%) and remain gated.
         """
         if model_source not in ROLLING_WR_MODELS:
             return None
+        if model_source == 'custom' and direction == 'long':
+            return None   # see LONGS-excluded note above
         try:
             with get_connection() as conn:
                 rows = conn.execute(
