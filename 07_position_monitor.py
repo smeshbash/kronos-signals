@@ -29,6 +29,7 @@ an exit already in flight from the WebSocket path (and vice versa).
 
 import asyncio
 import json
+import threading
 import logging
 import math
 import os
@@ -113,7 +114,20 @@ class PositionMonitor:
         self._exiting_pos_ids: set[int] = set()
 
         # Protects _position_cache and _exiting_pos_ids from concurrent access.
-        self._cache_lock: asyncio.Lock = asyncio.Lock()
+        # threading.Lock (not asyncio.Lock) — this guards _position_cache and
+        # _exiting_pos_ids, which are mutated both from the main event-loop
+        # thread (WS tick path) and from the 15-min maintenance job, which
+        # runs via run_in_executor on a separate thread. asyncio.Lock only
+        # provides mutual exclusion within a single event loop, so it cannot
+        # serialize those two threads against each other. No branch below
+        # awaits while holding this lock, so a plain threading.Lock is safe
+        # to use from async code too. (2026-08-31 — fixes a confirmed
+        # duplicate-exit race; see quality_flag='corrupted_bug:duplicate_m7_exit'
+        # / 'trailing_sl_bug' on trades 229 and others from 2026-05-25 to
+        # 2026-06-01, where the WS stop_loss/take_profit path and the
+        # maintenance horizon/time-limit/funding path raced on the same
+        # position.)
+        self._cache_lock: threading.Lock = threading.Lock()
 
         # Last WebSocket tick per symbol (epoch seconds). The REST backstop job
         # only polls symbols whose feed has gone quiet while positions are open.
@@ -270,7 +284,7 @@ class PositionMonitor:
         Checks all open positions for that symbol against the new mark price.
         Fires exits asynchronously in a thread executor (non-blocking).
         """
-        async with self._cache_lock:
+        with self._cache_lock:
             # Build snapshot of positions for this symbol that are not already exiting.
             to_check = [
                 pos for pos in self._position_cache.values()
@@ -304,7 +318,7 @@ class PositionMonitor:
 
             if exit_reason:
                 # Guard: claim this position before spawning the exit task.
-                async with self._cache_lock:
+                with self._cache_lock:
                     if pos['id'] in self._exiting_pos_ids:
                         continue  # another task already claimed it
                     self._exiting_pos_ids.add(pos['id'])
@@ -339,7 +353,7 @@ class PositionMonitor:
             log.exception('_async_exit failed for pos_id=%d: %s', pos['id'], exc)
         finally:
             # Always clean up — whether exit succeeded or failed.
-            async with self._cache_lock:
+            with self._cache_lock:
                 self._position_cache.pop(pos['id'], None)
                 self._exiting_pos_ids.discard(pos['id'])
 
@@ -370,7 +384,7 @@ class PositionMonitor:
         maintenance cron was previously the only fallback).
         """
         now = time.time()
-        async with self._cache_lock:
+        with self._cache_lock:
             open_symbols = {
                 pos['symbol'] for pos in self._position_cache.values()
                 if pos['id'] not in self._exiting_pos_ids
@@ -501,9 +515,10 @@ class PositionMonitor:
         # when the prediction window closed? No ATR-based target distortion.
         if PAPER_MODE and self._is_horizon_exit(pos):
             pos_id = pos['id']
-            if pos_id in self._exiting_pos_ids:
-                return
-            self._exiting_pos_ids.add(pos_id)
+            with self._cache_lock:
+                if pos_id in self._exiting_pos_ids:
+                    return
+                self._exiting_pos_ids.add(pos_id)
             mp = mark_price or pos['entry_price']
             pnl_sign = '+' if (
                 (pos['direction'] == 'long'  and mp > pos['entry_price']) or
@@ -513,36 +528,47 @@ class PositionMonitor:
                      pos['trade_id'], pos['symbol'], pos['direction'],
                      mp, pos['entry_price'], pnl_sign)
             self._exit_position(pos, 'horizon_exit', 'market', mp)
-            self._exiting_pos_ids.discard(pos_id)
+            # Pop from cache too (not just the exiting-claim set) — otherwise
+            # this closed position lingers in _position_cache until the next
+            # 15-min refresh and a WS tick can re-trigger a second exit on it.
+            with self._cache_lock:
+                self._position_cache.pop(pos_id, None)
+                self._exiting_pos_ids.discard(pos_id)
             return
 
         # Time limit (5-day hard exit)
         if self._is_time_limit(pos):
             pos_id = pos['id']
-            if pos_id in self._exiting_pos_ids:
-                return
-            self._exiting_pos_ids.add(pos_id)
+            with self._cache_lock:
+                if pos_id in self._exiting_pos_ids:
+                    return
+                self._exiting_pos_ids.add(pos_id)
             log.info('Time limit triggered: trade_id=%d %s held past 5 days', trade_id, symbol)
             # Cancel bracket orders before placing the market close so
             # exchange doesn't double-execute on the same position.
             self._cancel_bracket_orders(pos)
             mp = mark_price or pos['entry_price']
             self._exit_position(pos, 'time_limit', 'market', mp)
-            self._exiting_pos_ids.discard(pos_id)
+            with self._cache_lock:
+                self._position_cache.pop(pos_id, None)
+                self._exiting_pos_ids.discard(pos_id)
             return
 
         # Funding cost exit (disabled by default)
         if FUNDING_EXIT_ENABLED and self._is_funding_cost_exit(pos, funding_rate):
             pos_id = pos['id']
-            if pos_id in self._exiting_pos_ids:
-                return
-            self._exiting_pos_ids.add(pos_id)
+            with self._cache_lock:
+                if pos_id in self._exiting_pos_ids:
+                    return
+                self._exiting_pos_ids.add(pos_id)
             log.info('Funding cost exit triggered: trade_id=%d %s %s rate=%.6f',
                      trade_id, symbol, direction, funding_rate)
             self._cancel_bracket_orders(pos)
             mp = mark_price or pos['entry_price']
             self._exit_position(pos, 'funding_cost', 'market', mp)
-            self._exiting_pos_ids.discard(pos_id)
+            with self._cache_lock:
+                self._position_cache.pop(pos_id, None)
+                self._exiting_pos_ids.discard(pos_id)
             return
 
     # ── Position cache ────────────────────────────────────────────────────────
@@ -569,7 +595,7 @@ class PositionMonitor:
                        FROM positions p WHERE p.status='open'"""
                 ).fetchall()
 
-            async with self._cache_lock:
+            with self._cache_lock:
                 db_ids = {row['id'] for row in rows}
 
                 # Add new positions.
@@ -834,8 +860,13 @@ class PositionMonitor:
                     log.warning('fetch_order TP %s failed: %s', tp_order_id, exc)
 
             if filled_reason and filled_price:
-                # Claim position before processing to prevent double-exit.
-                self._exiting_pos_ids.add(pos_id)
+                # Claim position before processing to prevent double-exit —
+                # re-checked under lock in case the WS path claimed it between
+                # the early peek above and here.
+                with self._cache_lock:
+                    if pos_id in self._exiting_pos_ids:
+                        continue
+                    self._exiting_pos_ids.add(pos_id)
 
                 log.info('Reconciled bracket fill: pos=%d %s %s %s @ %.4f',
                          pos_id, pos['symbol'], pos['direction'],
@@ -848,7 +879,13 @@ class PositionMonitor:
 
                 # Close position in DB using the exchange fill price.
                 self._exit_position(pos, filled_reason, 'market', filled_price)
-                self._exiting_pos_ids.discard(pos_id)
+                # Pop from cache too — same rationale as _maintain_position's
+                # horizon/time-limit/funding exits: leaving a closed position
+                # in _position_cache lets a WS tick re-trigger a second exit
+                # on it before the next 15-min refresh evicts it.
+                with self._cache_lock:
+                    self._position_cache.pop(pos_id, None)
+                    self._exiting_pos_ids.discard(pos_id)
 
     def _cancel_bracket_orders(self, pos: dict) -> None:
         """
