@@ -68,17 +68,17 @@ _LEVEL_ORDER: dict[str, int] = {'green': 0, 'yellow': 1, 'orange': 2, 'red': 3}
 ASSETS: dict[str, str] = {
     'BTCUSD': 'BTC/USD:USD',
     'ETHUSD': 'ETH/USD:USD',
-    'SOLUSD': 'SOL/USD:USD',
     'BNBUSD': 'BNB/USD:USD',
     'XRPUSD': 'XRP/USD:USD',
+    'LINKUSD': 'LINK/USD:USD',
 }
 
 _DEFAULT_CONTRACT_SIZES: dict[str, float] = {
     'BTCUSD': 0.001,
     'ETHUSD': 0.01,
-    'SOLUSD': 1.0,
     'BNBUSD': 0.1,
-    'XRPUSD': 10.0,
+    'XRPUSD': 1.0,     # 1 XRP per contract — corrected 2026-06-07 (was 10.0, inflated fees 10x)
+    'LINKUSD': 1.0,    # 1 LINK per contract — confirmed 2026-06-16 via ccxt load_markets()
 }
 
 
