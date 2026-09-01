@@ -331,10 +331,25 @@ class KronosInference:
 
     @staticmethod
     def _compute_atr_pct(rows: list[dict]) -> float:
+        """
+        ATR over the most recent ATR_PERIOD candles, as a fraction of the
+        current close. `rows` is chronologically ascending (index -1 = newest
+        — see _fetch_ohlcv), so the recent window is the TAIL of the array.
+
+        Bug fixed 2026-08-31: this previously iterated `range(1, ATR_PERIOD+1)`
+        — the FRONT of the (already SEQ_LEN-truncated) rows array — computing
+        a true-range average from candles ~ATR_PERIOD candles after the start
+        of a 96-candle (16-day) window, i.e. ~15-16 days stale, then dividing
+        that stale TR by rows[-1]['close'], today's price. base_confidence
+        (= |predicted_return| / (2*atr_pct)) was therefore calibrated against
+        volatility from two weeks ago rather than current volatility.
+        """
         if len(rows) < 2:
             return 0.0
         trs = []
-        for i in range(1, min(ATR_PERIOD + 1, len(rows))):
+        n     = len(rows)
+        start = max(1, n - ATR_PERIOD)
+        for i in range(start, n):
             high       = rows[i]['high']
             low        = rows[i]['low']
             prev_close = rows[i - 1]['close']

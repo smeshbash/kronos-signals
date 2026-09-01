@@ -92,11 +92,22 @@ SLOT2_SYMBOL = 'ETHUSD'
 # ── ATR helper ─────────────────────────────────────────────────────────────────
 
 def _compute_atr_pct(rows: list[dict]) -> float:
-    """14-period ATR as fraction of last close. Identical across all generators."""
+    """
+    ATR over the most recent ATR_PERIOD candles, as fraction of last close.
+    Identical across all generators.
+
+    Bug fixed 2026-08-31: this previously iterated range(1, ATR_PERIOD+1) —
+    the FRONT of `rows` — which here is CONTEXT_LEN (1024 candles / ~170
+    days at 4H), so the TR average was computed from candles ~168 days
+    stale and then divided by today's close. Confidence was calibrated
+    against volatility from 5+ months ago rather than current volatility.
+    """
     if len(rows) < 2:
         return 0.0
     trs = []
-    for i in range(1, min(ATR_PERIOD + 1, len(rows))):
+    n     = len(rows)
+    start = max(1, n - ATR_PERIOD)
+    for i in range(start, n):
         high       = rows[i]['high']
         low        = rows[i]['low']
         prev_close = rows[i - 1]['close']
