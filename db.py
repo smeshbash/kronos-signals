@@ -419,6 +419,15 @@ def init_db() -> None:
         # v5+ snapshots have an explicit integer so dashboard/PM queries can
         # filter to the current regime for a clean capital baseline.
         "ALTER TABLE portfolio_snapshots ADD COLUMN regime_version INTEGER DEFAULT NULL",
+        # Forecast path agreement — how many of the model's PRED_LEN forecast
+        # steps agree in direction with the final (decision) step. Previously
+        # only existed transiently as `consistency` (= n_agree / PRED_LEN),
+        # folded multiplicatively into `confidence` and never persisted —
+        # recovering it after the fact required reconstructing atr_pct from
+        # historical OHLCV. Stored explicitly going forward so path-agreement
+        # can be queried directly. NULL for signals generated before this
+        # column existed. (2026-09-02)
+        "ALTER TABLE signals ADD COLUMN n_agree INTEGER DEFAULT NULL",
     ]
     for _sql in _migrations:
         try:

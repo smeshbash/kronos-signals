@@ -25,6 +25,9 @@ Output: KronosSignal dataclass
   predicted_return_pct — signed % predicted price change from current close
   candles_used         — number of OHLCV candles fed to the model
   signal_timestamp     — Unix epoch seconds of this signal
+  n_agree              — of the PRED_LEN forecast steps, how many agree in
+                         direction with the final (decision) step. Signals
+                         below MIN_N_AGREE are rejected before creation.
 
 Model interface (KronosInference):
   Loads a PyTorch model from KRONOS_MODEL_PATH. Tries torch.jit.load() first
@@ -116,6 +119,18 @@ ATR_PERIOD = 14   # ATR lookback for confidence normalisation
 # trigger a forced_override event.
 MAX_PREDICTED_RETURN_PCT = float(os.environ.get('KRONOS_MAX_PRED_RETURN', '20.0'))
 
+# Forecast path-agreement gate (2026-09-02).
+# n_agree = how many of the PRED_LEN forecast steps agree in direction with
+# the final (decision) step. Previously this only shrank `confidence`
+# multiplicatively (consistency = n_agree/PRED_LEN) and never blocked a
+# signal outright — a forecast where most steps disagreed with the final
+# one could still fire and execute. Reconstructed from historical OHLCV
+# (n=608 custom signals, 93.9% clean reconstruction): resolved WR was 31.5%
+# when n_agree < MIN_N_AGREE vs 50.9% at or above it — cutting ~18% of
+# volume, disproportionately the losing trades. Hard-blocked below this
+# threshold rather than just discounted.
+MIN_N_AGREE = 4
+
 # Correlation check constants (Section 5.2 / 11.2).
 # Rolling 7-day Pearson correlation above this threshold + same direction = BLOCKED.
 CORRELATION_BLOCK_THRESHOLD = 0.85
@@ -137,6 +152,7 @@ class KronosSignal:
     predicted_return_pct: float  # signed %, e.g. +1.5 or -0.8
     candles_used:         int    # number of input candles
     signal_timestamp:     int    # Unix epoch seconds
+    n_agree:              int    # forecast steps agreeing with final direction (of PRED_LEN)
 
 
 # ── Kronos model inference wrapper ────────────────────────────────────────────
@@ -222,12 +238,14 @@ class KronosInference:
         self,
         rows: list[dict],   # SQLite Row dicts: open, high, low, close, volume
         symbol: str = '',   # for anomaly log context
-    ) -> Optional[tuple[str, float, float, str, int]]:
+    ) -> Optional[tuple[str, float, float, str, int, int]]:
         """
         Run inference on a list of OHLCV row dicts.
 
-        Returns (direction, confidence, predicted_return_pct, horizon, candles_used)
-        or None if inference is unavailable, fails, or output is anomalous.
+        Returns (direction, confidence, predicted_return_pct, horizon,
+        candles_used, n_agree) or None if inference is unavailable, fails,
+        the output is anomalous, or the forecast path disagrees with itself
+        (see MIN_N_AGREE).
 
         Normalisation: per-channel instance normalisation (mean/std over the
         input window, RevIN-style) applied before forward pass, reversed on output.
@@ -313,21 +331,37 @@ class KronosInference:
 
         direction = 'long' if predicted_return > 0 else 'short'
 
+        n_agree = sum(
+            1 for pc in pred_closes
+            if (pc > current_close) == (direction == 'long')
+        )
+
+        # ── Forecast path-agreement gate ────────────────────────────────────
+        # If most of the 6-step forecast disagrees with the final (decision)
+        # step, the model is effectively flip-flopping — historically these
+        # signals were wrong ~70% of the time. Block outright rather than
+        # just discounting confidence (see MIN_N_AGREE above).
+        if n_agree < MIN_N_AGREE:
+            log_event(MODULE, 'info', 'signal_skipped',
+                      f'{symbol}: forecast path disagreement — only '
+                      f'{n_agree}/{len(pred_closes)} steps agree with final '
+                      f'direction (need {MIN_N_AGREE}) — skipping',
+                      {'symbol': symbol, 'direction': direction,
+                       'n_agree': n_agree, 'pred_len': len(pred_closes)})
+            return None
+        # ── End forecast path-agreement gate ────────────────────────────────
+
         atr_pct = self._compute_atr_pct(rows)
         if atr_pct <= 0:
             atr_pct = abs(predicted_return) if abs(predicted_return) > 0 else 1e-6
 
         base_confidence = min(1.0, abs(predicted_return) / (2.0 * atr_pct))
 
-        n_agree = sum(
-            1 for pc in pred_closes
-            if (pc > current_close) == (direction == 'long')
-        )
         consistency = n_agree / len(pred_closes)
         confidence = round(base_confidence * consistency, 4)
 
         return (direction, confidence, round(predicted_return_pct, 4),
-                HORIZON, candles_used)
+                HORIZON, candles_used, n_agree)
 
     @staticmethod
     def _compute_atr_pct(rows: list[dict]) -> float:
@@ -546,7 +580,7 @@ class SignalGenerator:
         if result is None:
             return None
 
-        direction, confidence, predicted_return_pct, horizon, candles_used = result
+        direction, confidence, predicted_return_pct, horizon, candles_used, n_agree = result
 
         signal = KronosSignal(
             symbol=symbol,
@@ -556,6 +590,7 @@ class SignalGenerator:
             predicted_return_pct=predicted_return_pct,
             candles_used=candles_used,
             signal_timestamp=int(time.time()),
+            n_agree=n_agree,
         )
 
         signal_id = self._write_signal(signal)
@@ -736,11 +771,13 @@ class SignalGenerator:
             cur = conn.execute(
                 """INSERT INTO signals
                        (symbol, direction, confidence, horizon, status,
-                        predicted_return_pct, signal_timestamp, regime_version)
-                   VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)""",
+                        predicted_return_pct, signal_timestamp, regime_version,
+                        n_agree)
+                   VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)""",
                 (signal.symbol, signal.direction, signal.confidence,
                  signal.horizon, signal.predicted_return_pct,
-                 signal.signal_timestamp, SIGNAL_REGIME_VERSION),
+                 signal.signal_timestamp, SIGNAL_REGIME_VERSION,
+                 signal.n_agree),
             )
             return cur.lastrowid
 
