@@ -215,8 +215,20 @@ REGIME_MODELS          = frozenset({'custom'})  # models subject to regime filte
 #   55%+   rolling WR → next signal WR = 65.7% (n=35)
 # Applied to custom model only — foundation model rolling WR history too thin.
 # Fails open when fewer than ROLLING_WR_MIN_N resolved signals exist.
-ROLLING_WR_WINDOW    = 10    # resolved signals to evaluate
-ROLLING_WR_MIN_N     = 7     # min resolved signals needed to fire (else fail open)
+# Now shorts-only — longs excluded 2026-08-30 (see _check_rolling_wr_block).
+#
+# Window widened 10→20 (2026-09-03): a 10-signal trailing window has a
+# ~17% false-block rate even for a genuinely healthy 50%-WR model (binomial
+# P(X<=3 wins | n=10, p=0.5) = 0.172) — noisy enough that a v6-only check
+# (n=12 firings, 33.3% WR on the gate's own actual_return_4h_pct metric)
+# couldn't distinguish "correctly detecting a cold streak" from "false
+# alarm on a small sample" with any confidence. Widening to 20 roughly
+# halves that false-alarm rate (~6% at n=20, p=0.5) while staying
+# responsive — the window draws from ALL custom short signals (executed
+# + rejected), not just executed ones, so it still fills fast (53 short
+# signals in v6 alone). MIN_N scaled proportionally.
+ROLLING_WR_WINDOW    = 20    # resolved signals to evaluate
+ROLLING_WR_MIN_N     = 14    # min resolved signals needed to fire (else fail open)
 ROLLING_WR_THRESHOLD = 0.40  # WR below this → block
 ROLLING_WR_MODELS    = frozenset({'custom'})
 
