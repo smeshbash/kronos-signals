@@ -88,6 +88,22 @@ CONTEXT_LEN = int(os.environ.get('KRONOS_MINI_4H_CONTEXT', '1024'))
 SLOT1_SYMBOL = 'BTCUSD'
 SLOT2_SYMBOL = 'ETHUSD'
 
+# Shorts-only sample-agreement ceiling (2026-09-03).
+# p_dir = fraction of the SAMPLE_COUNT stochastic samples agreeing with the
+# chosen direction (always >= 0.50 by construction — it's the winning side's
+# share). Backtested against 193 historical kronos-mini-4h short signals,
+# split into 10-point agreement bands:
+#   50-80/100 agreement (p_dir < 0.80): n=174, WR 60-64%, positive raw
+#     return AND positive real trade P&L in every band. Welch t=2.37 vs the
+#     rest of the distribution, t=2.08 vs the 50-70 sub-range specifically
+#     — both significant (p<0.05), not bucket-splitting noise.
+#   80-100/100 agreement (p_dir >= 0.80): n=27, WR ~47-50%, flat to
+#     slightly negative. The model's short-side edge disappears once its
+#     own samples become this unanimous.
+# Longs show no equivalent pattern (return is negative in every agreement
+# band tested) and are not gated by this constant.
+MAX_SHORT_SAMPLE_AGREEMENT = 0.80
+
 
 # ── ATR helper ─────────────────────────────────────────────────────────────────
 
@@ -288,6 +304,20 @@ class Mini4HGenerator:
             p_dir     = p_long if direction == 'long' else (1.0 - p_long)
 
             directional_conf = (p_dir - 0.5) * 2.0
+
+            # ── Shorts sample-agreement ceiling ─────────────────────────────
+            # See MAX_SHORT_SAMPLE_AGREEMENT above. Block outright rather than
+            # just letting a high directional_conf pass through — this is the
+            # one case where MORE model agreement means WORSE odds.
+            if direction == 'short' and p_dir >= MAX_SHORT_SAMPLE_AGREEMENT:
+                log_event(MODULE, 'info', 'signal_skipped',
+                          f'{symbol}: short sample agreement {p_dir*100:.0f}/100 '
+                          f'>= {MAX_SHORT_SAMPLE_AGREEMENT*100:.0f} — outside the '
+                          f'backtested edge band (50-80), skipping',
+                          {'symbol': symbol, 'direction': direction,
+                           'p_dir': p_dir, 'sample_count': len(sample_finals)})
+                return None
+            # ── End shorts sample-agreement ceiling ─────────────────────────
 
             mean_final           = float(np.mean(sample_finals))
             predicted_return_pct = (mean_final - current_close) / current_close * 100.0
