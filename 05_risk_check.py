@@ -1241,14 +1241,21 @@ class RiskCheck:
         Applied in both paper and live mode so v5 data accumulates under the
         same filter conditions used in live trading.
 
-        LONGS — two-gate filter (2026-06-10), daily gate relaxed 2026-08-25.
-          Historical suspension reason: 18 signals, WR=27.8%, EV=-Rs357/trade.
-          15/18 longs fired against daily downtrend (structural model bias).
-          v6 observation: 3/3 rejected longs all correct (100%, +2.51% avg);
-          the 30% body/range "bullish" gate blocked gradual uptrends where net
-          24H move was positive but intraday swings kept body/range < 30%.
-          (1) Daily gate: net close > open by >0.1% (last 24H) → proceed; else block.
-              Relaxed from strict 30% body/range to net direction (2026-08-25).
+        LONGS — two-gate filter, daily condition REVERSED 2026-09-03.
+          Historical suspension reason (pre-2026-08-25): 18 signals, WR=27.8%,
+          EV=-Rs357/trade. 15/18 longs fired against daily downtrend.
+          The 2026-08-25 "require daily-up" relaxation was itself never
+          validated at scale — v6 data (n=26 across both sides of the gate)
+          shows daily-not-up rejects at 57.1% WR (n=14) vs daily-up at 50.0%
+          WR (n=12), same-direction inversion as the equivalent mini-4h gate.
+          Note: this sample is thin (z=0.36, NOT statistically significant —
+          unlike mini-4h's well-powered n=56/66 case) and the effect is
+          concentrated almost entirely in the "down" sub-case (n=13, WR
+          61.5%) rather than "flat" (n=1, WR 0%). Reversed anyway on the
+          balance of directional evidence; re-validate once more v6+ data
+          accumulates given the weak statistical power here.
+          (1) Daily gate: net close > open by >0.1% (last 24H) → BLOCK (was:
+              proceed). Approve when net-flat/down instead.
           (2) RVOL lower bound ≥0.75x: validated on shorts (WR=31% below it, n=16).
               Upper bound removed — high-volume days are strong trend days; no
               empirical basis for blocking them on longs. (2026-08-28)
@@ -1277,15 +1284,19 @@ class RiskCheck:
         if model_source != 'kronos-base-4h':
             return None
 
-        # ── Longs: net daily direction + RVOL in band ────────────────────────
+        # ── Longs: net daily direction (REVERSED 2026-09-03) + RVOL in band ──
+        # Was "require daily-up"; v6 data showed that pool at 50.0% WR (n=12)
+        # vs daily-not-up at 57.1% WR (n=14) — flipped rather than removed,
+        # same rationale as the equivalent mini-4h gate. See docstring caveat
+        # on sample size before trusting this without further data.
         if direction == 'long':
             daily_dir = RiskCheck._get_synthetic_daily_direction(symbol)
-            if daily_dir != 'up':
+            if daily_dir == 'up':
                 return (
-                    f'kronos_base_4h_long_daily_not_up: '
-                    f'{symbol} 24H synthetic direction is {daily_dir} — '
-                    f'long suppressed when market net-flat/down. '
-                    f'Relaxed from 30% body/range gate (2026-08-25).'
+                    f'kronos_base_4h_long_daily_up_blocked: '
+                    f'{symbol} 24H synthetic direction is up — long blocked. '
+                    f'Gate reversed 2026-09-03: daily-up longs scored 50.0% WR '
+                    f'(n=12) vs daily-not-up 57.1% WR (n=14) in v6.'
                 )
             rvol = RiskCheck._get_4h_rvol(symbol)
             if rvol is not None and not (0.75 <= rvol <= 1.50):
