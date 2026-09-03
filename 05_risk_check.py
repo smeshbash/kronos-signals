@@ -1156,13 +1156,25 @@ class RiskCheck:
 
         Applied in both paper and live mode.
 
-        LONGS — reinstated v6 2026-08-25 with net daily direction gate.
-          v5 history: WR=21.4%, EV=-Rs376/trade (n=28); 92.8% fired counter-trend.
-          v6 observation: 6/6 correct (100%) under blanket suspension — all signals
-          fired with positive actual_return_pct. Suspension was over-penalising.
-          Gate: require net close > open by >0.1% over last 6×4H (same gate applied
-          to custom and base-4h longs on 2026-08-25). No RVOL gate — v5 n too thin.
-          Monitor: if v6 WR drops below 50% at n≥20, re-suspend.
+        LONGS — gate reversed 2026-09-03. The 2026-08-25 "require daily-up"
+          direction gate was reinstated on n=6 (100% WR) and never re-checked
+          against its own stated tripwire ("re-suspend if v6 WR drops below
+          50% at n≥20"). At n=56 the approved (daily-up) pool scored 39.3%
+          WR while the rejected (daily-not-up) pool scored 62.1% WR (n=66)
+          — the gate was picking the WORSE half of the distribution, not the
+          better one. Confirmed independently via a full sample-agreement
+          backtest (n=225 across all regimes): average directional return
+          was negative in every single agreement band, executed or not —
+          there is no rescuable subset of mini-4h longs under the old logic.
+          Real trade P&L under the old gate: 44 trades, 34.1% WR, -Rs10,462
+          total, -Rs238/trade average.
+          Fix: require net-NOT-up (flat or down) over the last 6×4H instead
+          of net-up — i.e. flip the condition rather than removing the gate,
+          since "not up" is exactly the pool that scored 62.1% WR. No RVOL
+          gate — sample too thin to validate a volume filter on top of this.
+          Monitor: re-check against fresh v6+ data once n≥30 resolved under
+          the reversed gate; the market-regime assumption behind "daily-not-
+          up favors mini-4h longs" could itself drift.
 
         SHORTS — skip when synthetic daily candle (last 6 × 4H = 24H) is bullish.
           Daily bullish:  n=3,  WR=0%,   EV=-Rs 333  → blocked
@@ -1178,17 +1190,20 @@ class RiskCheck:
         if model_source != 'kronos-mini-4h':
             return None
 
-        # ── Longs: net daily direction gate (reinstated 2026-08-25) ──────────
+        # ── Longs: net daily direction gate — REVERSED 2026-09-03 ────────────
+        # Was "require daily-up"; data showed that pool at 39.3% WR (n=56)
+        # vs 62.1% WR (n=66) for daily-not-up. Flipped rather than removed.
         if direction == 'long':
             daily_dir = RiskCheck._get_synthetic_daily_direction(symbol)
-            if daily_dir != 'up':
+            if daily_dir == 'up':
                 return (
-                    f'kronos_mini_4h_long_daily_not_up: {symbol} 24H synthetic '
-                    f'direction is {daily_dir} — long suppressed when market net-flat/down. '
-                    f'Reinstated v6 with direction gate (v5 WR=21.4% n=28; v6 WR=100% n=6). '
-                    f'(2026-08-25)'
+                    f'kronos_mini_4h_long_daily_up_blocked: {symbol} 24H synthetic '
+                    f'direction is up — long blocked. Gate reversed 2026-09-03: '
+                    f'daily-up longs scored 39.3% WR (n=56) vs daily-not-up '
+                    f'62.1% WR (n=66) in v6 — the old "require up" gate was '
+                    f'approving the worse half of the distribution.'
                 )
-            return None   # APPROVED: net-up daily
+            return None   # APPROVED: daily NOT up (flat/down)
 
         # ── Shorts: BTCUSD blocked — model directionally wrong on BTC ───────
         # v6 data: 10 SL, 0 TP on BTCUSD shorts. Signal-level directional
