@@ -46,7 +46,7 @@ _HIT_THR = 0.15   # %
 
 # Ordered list of known model sources — drives filter chips, cards, analysis views.
 _MODEL_OPTS = [
-    ('custom',         'Custom ⊘', 'b-gold',    '#7a5200'),   # halted 2026-06-05
+    ('custom',         'Custom',   'b-gold',    '#7a5200'),   # active — see rolling WR gate for shorts
     ('kronos-mini',    'Mini 1H',  'b-blue',    '#0747a6'),
     ('kronos-base',    'Base 1H',  'b-purple',  '#403294'),
     ('kronos-mini-4h', 'Mini 4H',  'b-teal',    '#087f5b'),
@@ -634,6 +634,106 @@ def get_data(f: dict) -> dict:
                            .strftime('%d %b %H:%M'), round(cum, 2)])
         equity_chart[ms] = series
 
+    # 3b. Fund-level metrics — consolidated NAV, risk-adjusted return, benchmark.
+    # Distinct from the per-model equity_chart above: this treats the 5 model
+    # capital pools as ONE fund, which is what a capital allocator actually
+    # wants (the per-model split answers "which signal generator wins", not
+    # "how is my capital doing").
+    _n_models = len(_MODEL_OPTS)
+    fund_start_capital = _n_models * START
+    fund_nav = fund_start_capital + net   # `net` = aggregate net P&L, computed above
+    fund_return_pct = (net / fund_start_capital * 100) if fund_start_capital else 0.0
+
+    # Daily NAV series from the aggregate snapshot (model_source IS NULL),
+    # resampled to last-snapshot-per-day — gives a clean daily return series
+    # for Sharpe/Sortino/Calmar without needing a dedicated timeseries table.
+    _fund_snap_raw = _q(
+        "SELECT timestamp, total_value FROM portfolio_snapshots"
+        " WHERE model_source IS NULL AND regime_version=? ORDER BY timestamp ASC",
+        (f.get('regime', SIGNAL_REGIME_VERSION),))
+    _daily_nav: dict = {}
+    for r in _fund_snap_raw:
+        day = datetime.fromtimestamp(int(r['timestamp']), tz=timezone.utc).strftime('%Y-%m-%d')
+        _daily_nav[day] = _f(r['total_value'], fund_start_capital)   # ASC order — last write wins
+    _daily_days = sorted(_daily_nav.keys())
+    _daily_vals = [_daily_nav[d] for d in _daily_days]
+    _daily_rets = []
+    for i in range(1, len(_daily_vals)):
+        prev = _daily_vals[i - 1]
+        if prev > 0:
+            _daily_rets.append((_daily_vals[i] - prev) / prev)
+
+    # Risk-free rate is an assumption (~India repo/FD ballpark), not a live feed —
+    # surfaced in the UI so it's never a hidden input to the ratios below.
+    RISK_FREE_ANNUAL = 0.07
+    _rf_daily = RISK_FREE_ANNUAL / 365.0
+
+    def _std(xs):
+        n_ = len(xs)
+        if n_ < 2:
+            return 0.0
+        m_ = sum(xs) / n_
+        return (sum((x - m_) ** 2 for x in xs) / (n_ - 1)) ** 0.5
+
+    _n_ret = len(_daily_rets)
+    if _n_ret >= 2:
+        _mean_ret  = sum(_daily_rets) / _n_ret
+        _sd_ret    = _std(_daily_rets)
+        sharpe     = ((_mean_ret - _rf_daily) / _sd_ret * (365 ** 0.5)) if _sd_ret > 0 else 0.0
+        _downside  = [min(0.0, r - _rf_daily) for r in _daily_rets]
+        _dd_dev    = (sum(x * x for x in _downside) / _n_ret) ** 0.5
+        sortino    = ((_mean_ret - _rf_daily) / _dd_dev * (365 ** 0.5)) if _dd_dev > 0 else 0.0
+        _ann_ret   = _mean_ret * 365
+        calmar     = (_ann_ret / (max_dd / 100.0)) if max_dd > 0 else 0.0
+    else:
+        sharpe = sortino = calmar = 0.0
+
+    # Below ~30 daily observations these ratios are still noisy point estimates —
+    # same "thin sample" caveat this whole session kept running into. Surfaced as
+    # a UI flag rather than hidden, so it can't be over-trusted at a glance.
+    risk_metrics = dict(
+        sharpe=sharpe, sortino=sortino, calmar=calmar,
+        n_days=_n_ret, thin=_n_ret < 30,
+        risk_free_annual=RISK_FREE_ANNUAL,
+    )
+
+    # BTC buy-and-hold benchmark over the same window, normalised to % return
+    # so it's directly comparable to the fund's own % return on one chart.
+    _fund_start_ts = int(_fund_snap_raw[0]['timestamp']) if _fund_snap_raw else 0
+    _btc_raw = _q(
+        "SELECT timestamp, close FROM ohlcv WHERE symbol='BTCUSD' AND timeframe='4h'"
+        " AND timestamp >= ? ORDER BY timestamp ASC",
+        (_fund_start_ts,)) if _fund_start_ts else []
+    fund_vs_btc = []
+    btc_return_pct = 0.0
+    if _btc_raw and _daily_vals:
+        _btc0 = _f(_btc_raw[0]['close'])
+        _fund0 = _daily_vals[0]
+        _btc_by_day: dict = {}
+        for r in _btc_raw:
+            day = datetime.fromtimestamp(int(r['timestamp']), tz=timezone.utc).strftime('%Y-%m-%d')
+            _btc_by_day[day] = _f(r['close'])
+        for day in _daily_days:
+            fund_pct = ((_daily_nav[day] - _fund0) / _fund0 * 100) if _fund0 else 0.0
+            btc_px   = _btc_by_day.get(day)
+            btc_pct  = ((btc_px - _btc0) / _btc0 * 100) if (btc_px and _btc0) else None
+            fund_vs_btc.append([day, round(fund_pct, 3),
+                                round(btc_pct, 3) if btc_pct is not None else None])
+        if _btc0:
+            btc_return_pct = (_f(_btc_raw[-1]['close']) - _btc0) / _btc0 * 100
+
+    # Tax reserve — already tracked (09_tax_tracker.py) but never surfaced on
+    # the dashboard before; distributable = net P&L not set aside for tax.
+    _tax_row = _q("SELECT balance_after FROM tax_reserve ORDER BY timestamp DESC LIMIT 1")
+    tax_reserve_balance = _f(_tax_row[0]['balance_after']) if _tax_row else 0.0
+    distributable = net - tax_reserve_balance
+
+    fund_data = dict(
+        nav=fund_nav, start_capital=fund_start_capital, return_pct=fund_return_pct,
+        risk=risk_metrics, vs_btc=fund_vs_btc, btc_return_pct=btc_return_pct,
+        tax_reserve=tax_reserve_balance, distributable=distributable,
+    )
+
     # 4. Confidence calibration — accuracy per confidence band per model
     cal_raw = _q(f"""
         SELECT COALESCE(model_source,'custom') ms,
@@ -819,13 +919,21 @@ def get_data(f: dict) -> dict:
         " AND COALESCE(s.regime_version, 1) = ?",
         (_now_ts - 7 * 86400, _pnl_regime)) or [{'g': 0}])[0]['g'])
 
-    # Rolling WR block status (custom model longs + shorts — mirrors risk_check logic)
-    _ROLLING_WR_WINDOW    = 10
-    _ROLLING_WR_MIN_N     = 7
+    # Rolling WR block status (custom model, shorts only — mirrors risk_check logic).
+    # Kept in sync by hand with ROLLING_WR_WINDOW/MIN_N/THRESHOLD in 05_risk_check.py —
+    # widened 10->20 / 7->14 there on 2026-09-03; update both places together.
+    _ROLLING_WR_WINDOW    = 20
+    _ROLLING_WR_MIN_N     = 14
     _ROLLING_WR_THRESHOLD = 0.40
     rolling_wr: dict = {}
     for _rwr_ms in ['custom']:
         for _rwr_dir in ['long', 'short']:
+            # Longs are excluded from this gate entirely since 2026-08-30 (see
+            # _check_rolling_wr_block) — still shown for visibility, but never
+            # actually blocked, so don't compute a misleading blocked/clear verdict.
+            if _rwr_dir == 'long':
+                rolling_wr[(_rwr_ms, _rwr_dir)] = {'wr': None, 'n': 0, 'blocked': False, 'exempt': True}
+                continue
             _rwr_rows = _q(
                 """SELECT actual_return_4h_pct, direction FROM signals
                    WHERE (model_source=? OR (? = 'custom' AND model_source IS NULL))
@@ -844,10 +952,10 @@ def get_data(f: dict) -> dict:
                 _rwr_wr = _rwr_correct / _rwr_n
                 rolling_wr[(_rwr_ms, _rwr_dir)] = {
                     'wr': _rwr_wr, 'n': _rwr_n,
-                    'blocked': _rwr_wr < _ROLLING_WR_THRESHOLD,
+                    'blocked': _rwr_wr < _ROLLING_WR_THRESHOLD, 'exempt': False,
                 }
             else:
-                rolling_wr[(_rwr_ms, _rwr_dir)] = {'wr': None, 'n': _rwr_n, 'blocked': False}
+                rolling_wr[(_rwr_ms, _rwr_dir)] = {'wr': None, 'n': _rwr_n, 'blocked': False, 'exempt': False}
 
     # Most recent alert-level event (last 24H)
     _alert_ev = _q("""SELECT event_type, message, created_at FROM events
@@ -910,6 +1018,7 @@ def get_data(f: dict) -> dict:
         matrix_acc={k: dict(v) for k, v in matrix_acc.items()},
         all_mx_syms=all_mx_syms,
         equity_chart=equity_chart,
+        fund_data=fund_data,
         cal_data=cal_data,
         funnel_data=funnel_data,
         sigs_list=sigs_list,
@@ -1162,7 +1271,7 @@ tr:hover td{background:#f8f9fb}
 
 # ── JavaScript ────────────────────────────────────────────────────────────────
 
-def _build_js(equity_json: str) -> str:
+def _build_js(equity_json: str, fund_json: str = '[]') -> str:
     return f"""
 <script>
 // ── Tab management ────────────────────────────────────────────────────────────
@@ -1181,11 +1290,56 @@ function showTab(name) {{
         u.searchParams.set('tab', name);
         history.replaceState(null, '', u.toString());
     }} catch(e) {{}}
-    // Lazy-init chart when Analysis tab becomes visible
+    // Lazy-init charts when their tab first becomes visible
     if (name === 'analysis' && !window._chartInited) {{
         window._chartInited = true;
         setTimeout(initEquityChart, 50);
     }}
+    if (name === 'fund' && !window._fundChartInited) {{
+        window._fundChartInited = true;
+        setTimeout(initFundChart, 50);
+    }}
+}}
+
+// ── Fund vs BTC chart ─────────────────────────────────────────────────────────
+var _FUND_DATA = {fund_json};   // [[day, fund_pct, btc_pct_or_null], ...]
+
+function initFundChart() {{
+    var canvas = document.getElementById('fund-chart');
+    if (!canvas || typeof Chart === 'undefined') return;
+    if (!_FUND_DATA.length) {{
+        canvas.parentElement.innerHTML =
+          '<div class="empty">Not enough daily snapshots yet — check back after a few more days.</div>';
+        return;
+    }}
+    var labels   = _FUND_DATA.map(function(p) {{ return p[0]; }});
+    var fundVals = _FUND_DATA.map(function(p) {{ return p[1]; }});
+    var btcVals  = _FUND_DATA.map(function(p) {{ return p[2]; }});
+    new Chart(canvas, {{
+        type: 'line',
+        data: {{
+            labels: labels,
+            datasets: [
+                {{ label: 'Fund (% return)', data: fundVals, borderColor: '#0052cc',
+                   backgroundColor: 'transparent', tension: 0.3,
+                   pointRadius: fundVals.length > 60 ? 0 : 3, borderWidth: 2 }},
+                {{ label: 'BTC buy-and-hold (% return)', data: btcVals, borderColor: '#f0a500',
+                   backgroundColor: 'transparent', tension: 0.3, borderDash: [5,3],
+                   pointRadius: 0, borderWidth: 2 }},
+            ]
+        }},
+        options: {{
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: {{ mode: 'index', intersect: false }},
+            scales: {{
+                x: {{ ticks: {{ maxRotation: 40, maxTicksLimit: 10, font: {{ size: 10 }} }} }},
+                y: {{ ticks: {{ font: {{ size: 10 }},
+                      callback: function(v) {{ return v + '%'; }} }} }},
+            }},
+            plugins: {{ legend: {{ labels: {{ font: {{ size: 11 }} }} }} }},
+        }}
+    }});
 }}
 
 // ── Equity curve chart ────────────────────────────────────────────────────────
@@ -1267,7 +1421,7 @@ function initEquityChart() {{
 window.onload = function() {{
     var urlTab = '';
     try {{ urlTab = new URLSearchParams(window.location.search).get('tab') || ''; }} catch(e) {{}}
-    var activeTab = urlTab || localStorage.getItem('kronos-tab') || 'summary';
+    var activeTab = urlTab || localStorage.getItem('kronos-tab') || 'fund';
     showTab(activeTab);
 
     document.querySelectorAll('.chip input[type=checkbox]').forEach(function(inp) {{
@@ -1300,7 +1454,7 @@ window.onload = function() {{
 
     document.getElementById('flt').addEventListener('submit', function() {{
         document.getElementById('flt-tab').value =
-            localStorage.getItem('kronos-tab') || 'summary';
+            localStorage.getItem('kronos-tab') || 'fund';
     }});
 
     // Auto-refresh every 30 s — use JS instead of <meta http-equiv="refresh"> so
@@ -1400,6 +1554,104 @@ def _render_filter_bar(f: dict, all_symbols: list) -> str:
     </div>
   </div>
 </form>"""
+
+
+# ── Tab 0: Fund pane ──────────────────────────────────────────────────────────
+# Built for a capital allocator, not a model builder: ONE consolidated NAV
+# across all 5 model pools, risk-adjusted return, a benchmark comparison, and
+# tax/distributable capital. Deliberately does not repeat per-model detail —
+# that's what Analysis and Summary are for.
+
+def _fmt_ratio(v: float) -> str:
+    try:
+        return f'{v:+.2f}'
+    except Exception:
+        return '--'
+
+def _render_fund_pane(d: dict, f: dict) -> str:
+    fund   = d.get('fund_data', {})
+    risk   = fund.get('risk', {})
+    nav    = fund.get('nav', 0.0)
+    start  = fund.get('start_capital', 0.0)
+    ret    = fund.get('return_pct', 0.0)
+    btc    = fund.get('btc_return_pct', 0.0)
+    cur_dd = d.get('cur_dd', 0.0)
+    max_dd = d.get('max_dd', 0.0)
+    tax    = fund.get('tax_reserve', 0.0)
+    distrib = fund.get('distributable', 0.0)
+
+    mode_note = ('<div style="background:#fffae6;border:1px solid #ffe380;border-radius:6px;'
+                 'padding:9px 14px;margin-bottom:14px;font-size:.8rem;color:#172b4d">'
+                 '<strong>&#9888; Paper trading.</strong> These are simulated results — '
+                 'no real capital is currently deployed.</div>') if PAPER else ''
+
+    vs_btc_html = ''
+    if ret >= btc:
+        vs_btc_html = f'<span class="pos">+{ret - btc:.2f}pp ahead of BTC buy-and-hold</span>'
+    else:
+        vs_btc_html = f'<span class="neg">{ret - btc:.2f}pp behind BTC buy-and-hold</span>'
+
+    hero_cards = f"""
+<div class="cards" style="grid-template-columns:repeat(4,1fr)">
+  <div class="card" style="border-top:3px solid #0052cc">
+    <div class="card-lbl">Fund NAV — {len(_MODEL_OPTS)} pools combined</div>
+    <div class="card-val">&#8377;{nav:,.0f}</div>
+    <div class="card-sub {_gain(ret)}">{"+" if ret>=0 else ""}{ret:.2f}% from &#8377;{start:,.0f}</div>
+  </div>
+  <div class="card">
+    <div class="card-lbl">Fund Return vs BTC Buy-and-Hold</div>
+    <div class="card-val {_gain(ret)}">{"+" if ret>=0 else ""}{ret:.2f}%</div>
+    <div class="card-sub neu">BTC over same window: {"+" if btc>=0 else ""}{btc:.2f}%
+      &nbsp;&mdash;&nbsp;{vs_btc_html}</div>
+  </div>
+  <div class="card">
+    <div class="card-lbl">Drawdown</div>
+    <div class="card-val {'neg' if cur_dd>5 else 'warn' if cur_dd>2 else 'pos'}">-{cur_dd:.2f}%</div>
+    <div class="card-sub neu">Max this regime: <span class="{'neg' if max_dd>5 else 'warn' if max_dd>2 else 'neu'}">-{max_dd:.2f}%</span></div>
+  </div>
+  <div class="card">
+    <div class="card-lbl">Distributable Capital</div>
+    <div class="card-val {_gain(distrib)}">&#8377;{distrib:,.0f}</div>
+    <div class="card-sub neu">Net P&amp;L &#8377;{d.get('net',0.0):,.0f} minus tax reserve &#8377;{tax:,.0f}</div>
+  </div>
+</div>"""
+
+    thin_badge = ('<span class="badge" style="background:#fffae6;color:#974f0c;font-size:.65rem;'
+                  'margin-left:6px">thin sample</span>') if risk.get('thin') else ''
+    risk_note = (f"Computed from {risk.get('n_days', 0)} daily observations "
+                 f"— {'below 30, treat as directional only, not a trustworthy point estimate' if risk.get('thin') else 'reasonable sample size'}. "
+                 f"Risk-free rate assumption: {risk.get('risk_free_annual', 0)*100:.1f}% annual (not a live feed).")
+
+    risk_cards = f"""
+<div class="section">
+  <div class="section-hdr">Risk-Adjusted Return{thin_badge}</div>
+  <div class="cards" style="grid-template-columns:repeat(3,1fr);margin:16px 16px 6px">
+    <div class="card" style="box-shadow:none;border:1px solid #f0f1f3">
+      <div class="card-lbl">Sharpe Ratio</div>
+      <div class="card-val {_gain(risk.get('sharpe',0))}">{_fmt_ratio(risk.get('sharpe',0))}</div>
+      <div class="card-sub neu">Return per unit of total volatility</div>
+    </div>
+    <div class="card" style="box-shadow:none;border:1px solid #f0f1f3">
+      <div class="card-lbl">Sortino Ratio</div>
+      <div class="card-val {_gain(risk.get('sortino',0))}">{_fmt_ratio(risk.get('sortino',0))}</div>
+      <div class="card-sub neu">Return per unit of downside volatility</div>
+    </div>
+    <div class="card" style="box-shadow:none;border:1px solid #f0f1f3">
+      <div class="card-lbl">Calmar Ratio</div>
+      <div class="card-val {_gain(risk.get('calmar',0))}">{_fmt_ratio(risk.get('calmar',0))}</div>
+      <div class="card-sub neu">Annualised return / max drawdown</div>
+    </div>
+  </div>
+  <div style="padding:0 16px 14px;font-size:.72rem;color:#97a0af">{risk_note}</div>
+</div>"""
+
+    chart_html = f"""
+<div class="section">
+  <div class="section-hdr">Fund NAV vs BTC Buy-and-Hold (% return, same window)</div>
+  <div style="padding:16px;height:300px"><canvas id="fund-chart"></canvas></div>
+</div>"""
+
+    return mode_note + hero_cards + risk_cards + chart_html
 
 
 # ── Tab 1: Summary pane ───────────────────────────────────────────────────────
@@ -1987,10 +2239,16 @@ def _render_summary_pane(d: dict, f: dict, notice: str) -> str:
         _rwr_wr  = _rv.get('wr')
         _rwr_n   = _rv.get('n', 0)
         _blocked = _rv.get('blocked', False)
-        if _rwr_wr is None:
+        if _rv.get('exempt'):
             _wr_str  = '<span class="neu">—</span>'
             _bar_str = ''
-            _status_str = f'<span class="tag">Insufficient history ({_rwr_n}&lt;10)</span>'
+            _status_str = ('<span class="tag" title="Excluded 2026-08-30 — blocked signals '
+                            'went on to score 72-96% WR, the gate was picking the worse half">'
+                            'Exempt (see note)</span>')
+        elif _rwr_wr is None:
+            _wr_str  = '<span class="neu">—</span>'
+            _bar_str = ''
+            _status_str = f'<span class="tag">Insufficient history ({_rwr_n}&lt;14)</span>'
         else:
             _wr_pct = _rwr_wr * 100
             _bar_color = '#ff5630' if _blocked else ('#36b37e' if _wr_pct >= 50 else '#f59e0b')
@@ -2011,11 +2269,11 @@ def _render_summary_pane(d: dict, f: dict, notice: str) -> str:
 <div class="section" style="margin-bottom:12px">
   <div class="section-hdr">Rolling Win-Rate Block
     <span class="tag" style="font-size:.67rem;text-transform:none;font-weight:400">
-      &nbsp;Custom model safety gate — blocks when last-10 WR &lt; 40% (min 7 signals)
+      &nbsp;Custom model safety gate (shorts only) — blocks when last-20 WR &lt; 40% (min 14 signals)
     </span>
   </div>
   <table style="width:auto"><thead>
-    <tr><th>Model</th><th>Direction</th><th style="min-width:160px">Rolling WR (last 10)</th><th>Status</th></tr>
+    <tr><th>Model</th><th>Direction</th><th style="min-width:160px">Rolling WR (last 20)</th><th>Status</th></tr>
   </thead><tbody>{rwr_rows}</tbody></table>
 </div>"""
     else:
@@ -2646,12 +2904,14 @@ def render(d: dict, f: dict) -> str:
     notice     = _make_notice(f)
     filter_bar = _render_filter_bar(f, d['all_symbols'])
 
+    fund_pane     = _render_fund_pane(d, f)
     summary_pane  = _render_summary_pane(d, f, notice)
     analysis_pane = _render_analysis_pane(d, f)
     signals_pane  = _render_signals_pane(d, f, notice)
     ops_pane      = _render_ops_pane(d, f, notice)
 
     equity_json   = json.dumps(d.get('equity_chart', {}), separators=(',', ':'))
+    fund_json     = json.dumps(d.get('fund_data', {}).get('vs_btc', []), separators=(',', ':'))
 
     mode_pill  = '<span class="pill pill-paper">PAPER</span>' if PAPER else '<span class="pill pill-live">LIVE</span>'
     phase_map  = {'pre_live': 'Pre-Live', 'income': 'Income', 'compound': 'Compound'}
@@ -2683,6 +2943,7 @@ def render(d: dict, f: dict) -> str:
 </div>
 
 <div class="tabs">
+  <button class="tab-btn" data-tab="fund"     onclick="showTab('fund')">Fund</button>
   <button class="tab-btn" data-tab="summary"  onclick="showTab('summary')">Summary</button>
   <button class="tab-btn" data-tab="analysis" onclick="showTab('analysis')">Analysis</button>
   <button class="tab-btn" data-tab="signals"  onclick="showTab('signals')">Signals</button>
@@ -2691,6 +2952,7 @@ def render(d: dict, f: dict) -> str:
 
 {filter_bar}
 
+<div id="pane-fund"     class="tab-pane">{fund_pane}</div>
 <div id="pane-summary"  class="tab-pane">{summary_pane}</div>
 <div id="pane-analysis" class="tab-pane">{analysis_pane}</div>
 <div id="pane-signals"  class="tab-pane">{signals_pane}</div>
@@ -2698,7 +2960,7 @@ def render(d: dict, f: dict) -> str:
 
 <div class="footer">Kronos Trading System &mdash; {'Paper trading' if PAPER else 'Live trading'} &mdash; Not financial advice</div>
 
-{_build_js(equity_json)}
+{_build_js(equity_json, fund_json)}
 </body>
 </html>"""
 
