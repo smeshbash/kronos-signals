@@ -848,8 +848,8 @@ def get_data(f: dict) -> dict:
     }
 
     # 6c. Weekly directional accuracy trend — last 12 weeks, all resolved signals.
-    # Applies model/direction/regime filters from the filter bar but uses a fixed
-    # 12-week window so the trend is always visible regardless of the Period selector.
+    # Applies model/symbol/direction/regime filters from the filter bar but uses a
+    # fixed 12-week window so the trend is always visible regardless of Period.
     _wt_parts  = ['actual_return_pct IS NOT NULL', 'quality_flag IS NULL',
                   f'signal_timestamp >= {int(time.time()) - 84 * 86400}']
     _wt_params = []
@@ -857,6 +857,10 @@ def get_data(f: dict) -> dict:
         ph = ','.join('?' * len(f['models']))
         _wt_parts.append(f"COALESCE(model_source,'custom') IN ({ph})")
         _wt_params.extend(f['models'])
+    if f.get('symbols'):
+        ph = ','.join('?' * len(f['symbols']))
+        _wt_parts.append(f'symbol IN ({ph})')
+        _wt_params.extend(f['symbols'])
     if f.get('direction') and f['direction'] not in ('both', ''):
         _wt_parts.append('direction = ?')
         _wt_params.append(f['direction'])
