@@ -240,14 +240,27 @@ class Execution:
         self._scheduler = AsyncIOScheduler(timezone='UTC')
         self._scheduler.add_job(
             self._job_run,
-            CronTrigger(minute=14, timezone='UTC'),
+            CronTrigger(minute='*/10', timezone='UTC'),
             id='execution_cron',
-            name='Execution — process approved signals (1H)',
+            name='Execution — process approved signals (10min)',
             max_instances=1,
             # Run late rather than skip when CPU-bound generator inference delays
             # the loop wakeup (see 2026-08-23 M15/M2 skipped cycles). A late
             # execution pass is safe: signal expiry still bounds staleness.
-            misfire_grace_time=600,
+            # Grace shortened from 600s (matched the old 1H cadence) to 120s
+            # so a missed tick doesn't wait most of a new 10min cycle to catch up.
+            #
+            # 2026-09-08: cadence tightened from hourly (minute=14) — that
+            # schedule was inherited from kronos-mini's 1H signal cadence and
+            # never revisited for the 4H models. Measured cost: signals
+            # approved just after the hourly tick waited up to 59min for
+            # execution, during which price moved against entry by +0.335%
+            # on average (n=15) and up to +2.9% in the worst case. */10
+            # caps worst-case wait at ~10min. No exchange-call cost increase
+            # when there's nothing approved (see _process_approved_signals'
+            # early return); position_monitor already polls the same
+            # exchange account 4x/hour without issue.
+            misfire_grace_time=120,
         )
         self._scheduler.start()
         log.info('Execution started (paper=%s, leverage=%.1fx)', PAPER_MODE, self._leverage)
