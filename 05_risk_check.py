@@ -1188,16 +1188,15 @@ class RiskCheck:
           the reversed gate; the market-regime assumption behind "daily-not-
           up favors mini-4h longs" could itself drift.
 
-        SHORTS — skip when synthetic daily candle (last 6 × 4H = 24H) is bullish.
-          Daily bullish:  n=3,  WR=0%,   EV=-Rs 333  → blocked
-          Daily neutral:  n=4,  WR=100%, EV=+Rs 518  → approved
-          Daily bearish:  n=10, WR=80%,  EV=+Rs 344  → approved
-          Removing the 3 bullish-daily shorts lifts total short PnL
-          from +Rs 4,518 to +Rs 5,519 over the same historical period.
+        SHORTS — bullish-daily gate REMOVED 2026-09-08. Original 2026-06-09
+          justification (n=3, WR=0%, EV=-Rs333 on the blocked bullish-daily
+          set) was never re-validated at scale. v6-only data (n=78 blocked)
+          showed the opposite: WR=71.4%, total +52.46% directional return
+          on the shorts it was suppressing. No daily-state condition on
+          mini-4h shorts is applied anymore (BTC symbol block still is).
 
-        RVOL gate deliberately omitted: n=17 total shorts is too thin to validate
-        a volume filter (one high-RVOL short was +Rs 1,171 — would be cut).
-        Re-evaluate after 40+ v5 short signals resolve.
+        RVOL gate deliberately omitted: too thin historically to validate
+        a volume filter; not revisited.
         """
         if model_source != 'kronos-mini-4h':
             return None
@@ -1228,17 +1227,14 @@ class RiskCheck:
                 'in v6 — model directionally wrong on BTC shorts. (2026-08-30)'
             )
 
-        # ── Shorts: skip when synthetic daily is bullish ──────────────────────
-        daily_state = RiskCheck._get_synthetic_daily_state(symbol)
+        # ── Shorts: bullish-daily gate REMOVED (2026-09-08) ───────────────────
+        # Original justification (2026-06-09) was WR=0% EV=-Rs333 on n=3 —
+        # never re-validated. v6-only data (n=78 blocked signals) shows the
+        # opposite: WR=71.4%, total +52.46% directional return on the shorts
+        # this gate was suppressing. Removed rather than re-tuned; no
+        # daily-state condition on mini-4h shorts currently holds up.
 
-        if daily_state == 'bullish':
-            return (
-                f'kronos_mini_4h_short_daily_bullish_blocked: '
-                f'{symbol} synthetic daily (last 24H) is bullish — '
-                f'counter-trend short. Backtest WR=0% EV=-Rs333 (n=3). (2026-06-09)'
-            )
-
-        return None   # neutral or bearish daily — APPROVED
+        return None   # APPROVED (BTC-block above still applies)
 
     @staticmethod
     def _check_kronos_base_4h_filter(
@@ -1311,13 +1307,14 @@ class RiskCheck:
                     f'(n=12) vs daily-not-up 57.1% WR (n=14) in v6.'
                 )
             rvol = RiskCheck._get_4h_rvol(symbol)
-            if rvol is not None and not (0.75 <= rvol <= 1.50):
+            if rvol is not None and rvol < 0.75:
                 return (
                     f'kronos_base_4h_long_rvol_gate: '
-                    f'RVOL={rvol:.2f}x outside 0.75–1.50x band. '
-                    f'<0.75x=noise candle, >1.50x=extended move. (2026-06-10)'
+                    f'RVOL={rvol:.2f}x below 0.75x minimum — noise candle. (2026-06-10)'
                 )
-            return None   # APPROVED: bullish daily + RVOL confirmed (or no data)
+            return None   # APPROVED: RVOL lower bound clear (or no data). Upper
+            # bound removed 2026-08-28 — see docstring; code previously still
+            # enforced it, a mismatch fixed 2026-09-08.
 
         # ── Shorts: RVOL gate with confidence-based lower-bound override ─────
         rvol = RiskCheck._get_4h_rvol(symbol)
@@ -1427,7 +1424,20 @@ class RiskCheck:
         77%/n=61): trade WITH the synthetic daily candle and require the 4H
         RVOL 0.75x-1.50x confirmation band.
 
-        LONGS — require net-upward 24H direction; RVOL band when volume data exists.
+        LONGS — direction condition REVERSED 2026-09-08. The 2026-08-25 fix
+          below (switching from strict body/range to net-direction) still
+          required daily-up, and that requirement was never re-checked once
+          it had run at scale: v6 data shows the approved (daily-up) pool at
+          35.7% WR / -5.01% total (n=14 executed) while the blocked
+          (daily-not-up, 90% of it specifically "down") pool scored 64.6%
+          WR / +42.62% total (n=52) — same inversion already found and fixed
+          for mini-4h and base-4h longs. RVOL sub-gate dropped along with the
+          flip (it was calibrated for the now-unapproved "up" pool; the
+          RVOL-blocked subset of that pool was itself -0.563%/sig, i.e. bad
+          for the same underlying reason, not a useful filter to carry over).
+          Re-evaluate once the reversed gate has its own n≥30.
+
+          Prior (2026-08-25) history, kept for context:
           The v5 counterfactual used a strict 30% body/range gate for "bullish":
             counter/neutral daily: 33.5% acc, -1.89%/sig (n=182) → blocked
             daily-bullish only:    59.0% acc, +0.25%/sig (n=61)  → pass
@@ -1453,18 +1463,15 @@ class RiskCheck:
 
         if direction == 'long':
             daily_dir = RiskCheck._get_synthetic_daily_direction(symbol)
-            if daily_dir != 'up':
+            if daily_dir == 'up':
                 return (
-                    f'custom_long_daily_not_up: {symbol} 24H synthetic direction '
-                    f'is {daily_dir} (need net close>open >0.1%). '
-                    f'v6 relaxed from 30% body/range gate. (2026-08-25)'
+                    f'custom_long_daily_up_blocked: {symbol} 24H synthetic direction '
+                    f'is up — long blocked. Gate reversed 2026-09-08: daily-up '
+                    f'longs scored 35.7% WR (n=14) vs daily-not-up 64.6% WR '
+                    f'(n=52) in v6.'
                 )
-            if rvol is not None and rvol < 0.75:
-                return (
-                    f'custom_long_rvol_gate: RVOL={rvol:.2f}x below 0.75x '
-                    f'minimum on up daily — noise candle. (2026-08-23)'
-                )
-            return None   # APPROVED: net-up daily + volume confirmed (or no data)
+            return None   # APPROVED: daily NOT up (flat/down). No RVOL check —
+            # see docstring; it was calibrated for the now-unapproved "up" pool.
 
         # ── Shorts — keep strict 30% body/range gate ─────────────────────────
         daily_state = RiskCheck._get_synthetic_daily_state(symbol)
