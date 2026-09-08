@@ -2282,7 +2282,8 @@ class RiskCheck:
 
     def _resolve_matured_signals(self) -> None:
         """
-        Populate actual_return_4h_pct and actual_return_pct for matured signals.
+        Populate actual_return_4h_pct, actual_return_pct, and MFE/MAE for
+        matured signals.
 
         actual_return_4h_pct — filled 4H after the signal, used by the rolling WR
           block for fast feedback. 4H resolution means the WR window fills 6× faster
@@ -2291,20 +2292,31 @@ class RiskCheck:
         actual_return_pct — filled at the signal's full horizon (default 24H), used
           for P&L analysis, calibration, and directional accuracy benchmarking.
 
-        Both columns are idempotent: already-resolved signals are skipped. Runs at
-        the end of every hourly risk-check cycle. Excludes quality-flagged signals.
+        mfe_pct / mae_pct — max favorable / adverse excursion over the full horizon
+          window, direction-aware, from every 4H candle's high/low in that window
+          (not just the entry/exit close). Tracked for every signal regardless of
+          executed/rejected status, so TP/SL multipliers can be tuned against the
+          real price path a signal took, not just its net return. (2026-09-09)
+
+        All four columns are idempotent: already-resolved ones are skipped per-row,
+        so a signal resolved for actual_return_pct before mfe_pct/mae_pct existed
+        gets those two backfilled on the next cycle without redoing the others.
+        Runs at the end of every hourly risk-check cycle. Excludes quality-flagged
+        signals.
         """
         now = int(time.time())
         resolved_4h  = 0
         resolved_24h = 0
+        resolved_mfe_mae = 0
 
         try:
             with get_connection() as conn:
                 pending = conn.execute(
-                    """SELECT id, symbol, signal_timestamp, horizon,
-                              actual_return_pct, actual_return_4h_pct
+                    """SELECT id, symbol, direction, signal_timestamp, horizon,
+                              actual_return_pct, actual_return_4h_pct, mfe_pct, mae_pct
                        FROM signals
-                       WHERE (actual_return_pct IS NULL OR actual_return_4h_pct IS NULL)
+                       WHERE (actual_return_pct IS NULL OR actual_return_4h_pct IS NULL
+                              OR mfe_pct IS NULL OR mae_pct IS NULL)
                          AND quality_flag IS NULL
                          AND status NOT IN ('pending')"""
                 ).fetchall()
@@ -2343,14 +2355,14 @@ class RiskCheck:
                             resolved_4h += 1
 
                     # ── Full horizon resolution (24H default) ─────────────────
+                    hz_str  = str(sig['horizon'] or '24h')
+                    m       = re.match(r'(\d+)\s*[Hh]', hz_str)
+                    hz_secs = int(m.group(1)) * 3600 if m else 86400
+
+                    if now < sig_ts + hz_secs:
+                        continue
+
                     if sig['actual_return_pct'] is None:
-                        hz_str  = str(sig['horizon'] or '24h')
-                        m       = re.match(r'(\d+)\s*[Hh]', hz_str)
-                        hz_secs = int(m.group(1)) * 3600 if m else 86400
-
-                        if now < sig_ts + hz_secs:
-                            continue
-
                         close_after = conn.execute(
                             """SELECT close FROM ohlcv
                                WHERE symbol=? AND timeframe='4h' AND timestamp>=?
@@ -2366,16 +2378,45 @@ class RiskCheck:
                             )
                             resolved_24h += 1
 
+                    # ── MFE / MAE over the full horizon window ────────────────
+                    if sig['mfe_pct'] is None or sig['mae_pct'] is None:
+                        window = conn.execute(
+                            """SELECT high, low FROM ohlcv
+                               WHERE symbol=? AND timeframe='4h'
+                                 AND timestamp > ? AND timestamp <= ?
+                               ORDER BY timestamp ASC""",
+                            (sym, sig_ts, sig_ts + hz_secs),
+                        ).fetchall()
+                        if window:
+                            max_high = max(float(r['high']) for r in window)
+                            min_low  = min(float(r['low'])  for r in window)
+                            # Both floored at 0: if price never moved favorably
+                            # (or never moved adversely) during the window, that
+                            # excursion is zero, not negative.
+                            if sig['direction'] == 'long':
+                                mfe = max(0.0, (max_high - base_close) / base_close * 100)
+                                mae = max(0.0, (base_close - min_low)  / base_close * 100)
+                            else:
+                                mfe = max(0.0, (base_close - min_low)  / base_close * 100)
+                                mae = max(0.0, (max_high - base_close) / base_close * 100)
+                            conn.execute(
+                                "UPDATE signals SET mfe_pct=?, mae_pct=? WHERE id=?",
+                                (round(mfe, 4), round(mae, 4), int(sig['id'])),
+                            )
+                            resolved_mfe_mae += 1
+
         except Exception as exc:
             log_event(MODULE, 'warning', 'signal_resolution_error',
                       f'Signal resolution failed: {exc}', {'error': str(exc)})
             return
 
-        total = resolved_4h + resolved_24h
+        total = resolved_4h + resolved_24h + resolved_mfe_mae
         if total:
             log_event(MODULE, 'info', 'signal_resolution',
-                      f'Resolved {resolved_4h} 4H + {resolved_24h} 24H signal outcomes',
-                      {'resolved_4h': resolved_4h, 'resolved_24h': resolved_24h})
+                      f'Resolved {resolved_4h} 4H + {resolved_24h} 24H signal outcomes '
+                      f'+ {resolved_mfe_mae} MFE/MAE',
+                      {'resolved_4h': resolved_4h, 'resolved_24h': resolved_24h,
+                       'resolved_mfe_mae': resolved_mfe_mae})
 
 
 # ── Standalone runner ─────────────────────────────────────────────────────────

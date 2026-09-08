@@ -428,6 +428,23 @@ def init_db() -> None:
         # can be queried directly. NULL for signals generated before this
         # column existed. (2026-09-02)
         "ALTER TABLE signals ADD COLUMN n_agree INTEGER DEFAULT NULL",
+        # MFE/MAE (max favorable / adverse excursion) over the signal's full
+        # horizon window, direction-aware, computed from every 4H candle's
+        # high/low between signal_timestamp and signal_timestamp+horizon —
+        # not just the entry/exit close used by actual_return_pct. Tracked
+        # for every signal regardless of executed/rejected status, so TP/SL
+        # multipliers can be tuned against the real price path rather than
+        # just the horizon's net return. Both expressed as positive % magnitudes:
+        #   long:  mfe = (max(high) - close_at_signal) / close_at_signal * 100
+        #          mae = (close_at_signal - min(low))  / close_at_signal * 100
+        #   short: mfe = (close_at_signal - min(low))  / close_at_signal * 100
+        #          mae = (max(high) - close_at_signal) / close_at_signal * 100
+        # Filled alongside actual_return_pct, same idempotent NULL-until-resolved
+        # convention. NULL for signals resolved before this column existed —
+        # backfilled naturally since _resolve_matured_signals re-checks any
+        # already-resolved row still missing these two columns. (2026-09-09)
+        "ALTER TABLE signals ADD COLUMN mfe_pct REAL DEFAULT NULL",
+        "ALTER TABLE signals ADD COLUMN mae_pct REAL DEFAULT NULL",
     ]
     for _sql in _migrations:
         try:
