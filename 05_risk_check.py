@@ -456,7 +456,7 @@ class RiskCheck:
         #   RVOL filter NOT applied: n=17 too thin, one high-RVOL short was +Rs 1,171.
         #   Re-evaluate RVOL gate after 40+ v5 short signals resolve.
         if not rejection_reason:
-            _mini_4h_block = RiskCheck._check_kronos_mini_4h_filter(model_source, direction, symbol)
+            _mini_4h_block = RiskCheck._check_kronos_mini_4h_filter(model_source, direction, symbol, confidence)
             if _mini_4h_block:
                 rejection_reason = _mini_4h_block
 
@@ -1162,6 +1162,7 @@ class RiskCheck:
         model_source: str,
         direction:    str,
         symbol:       str,
+        confidence:   float = 0.0,
     ) -> Optional[str]:
         """
         kronos-mini-4h direction and synthetic-daily gate (2026-06-09).
@@ -1213,6 +1214,21 @@ class RiskCheck:
                     f'daily-up longs scored 39.3% WR (n=56) vs daily-not-up '
                     f'62.1% WR (n=66) in v6 — the old "require up" gate was '
                     f'approving the worse half of the distribution.'
+                )
+            # XRPUSD-specific confidence floor (2026-09-08): confidence<0.05
+            # longs are XRP's worst cell by far — WR=39.4%, avg=-0.897% (n=33),
+            # the largest single confidence/symbol bucket in the whole model.
+            # Not applied to other symbols: BTCUSD's <0.05 longs scored 89% WR
+            # (n=9) and BNBUSD's scored 54% (n=35) in the same bucket — a
+            # blanket floor would have blocked those too. ETHUSD's <0.05 cell
+            # was reviewed and held back (WR=46% but avg return flat at
+            # +0.095%, n=13) — mixed evidence, not applied.
+            if symbol == 'XRPUSD' and confidence < 0.05:
+                return (
+                    f'kronos_mini_4h_long_xrp_low_confidence_blocked: '
+                    f'XRPUSD long confidence {confidence:.4f} < 0.05 — this cell '
+                    f'scored WR=39.4%, avg=-0.897% (n=33) in v6, the worst '
+                    f'confidence/symbol combination in the model. (2026-09-08)'
                 )
             return None   # APPROVED: daily NOT up (flat/down)
 
