@@ -1309,7 +1309,12 @@ class RiskCheck:
               empirical basis for blocking them on longs. (2026-08-28)
               Fail open (None) if RVOL unavailable — never block on missing data.
 
-        SHORTS — two-gate filter:
+        SHORTS — per-symbol overrides (2026-09-08) applied before the two-gate
+          filter below: BTCUSD confidence-gated (<0.50 blocked — WR/avg only
+          turn positive at >=0.50, n=23); LINKUSD blocked outright (every
+          confidence bucket negative, n=80, no rescuable subset).
+
+        SHORTS — two-gate filter (all other symbols):
           (1) RVOL gate (primary):
                 RVOL < 0.75x:    WR=31.2%, EV=-Rs  20 (n=16) aggregate — block.
                   Exception: confidence >= BASE_4H_SHORT_RVOL_CONF_OVERRIDE (0.65)
@@ -1355,6 +1360,31 @@ class RiskCheck:
             return None   # APPROVED: RVOL lower bound clear (or no data). Upper
             # bound removed 2026-08-28 — see docstring; code previously still
             # enforced it, a mismatch fixed 2026-09-08.
+
+        # ── Shorts: BTCUSD confidence floor (2026-09-08) ──────────────────────
+        # v6 confidence-bucket breakdown (n=70): WR climbs 20%->29%->32%->70%
+        # and avg return only turns positive at >=0.50 confidence (n=23,
+        # avg=+0.29%); every bucket below is negative. Same shape as the
+        # equivalent mini-4h finding, different model.
+        if symbol == 'BTCUSD' and confidence < 0.50:
+            return (
+                f'kronos_base_4h_short_btc_low_confidence_blocked: '
+                f'BTCUSD short confidence {confidence:.4f} < 0.50 — below-0.50 '
+                f'confidence WR<=32%, avg<=-0.37% in v6 (n=47); only >=0.50 '
+                f'(n=23) scored positive (WR=70%, avg=+0.29%). (2026-09-08)'
+            )
+
+        # ── Shorts: LINKUSD blocked entirely (2026-09-08) ─────────────────────
+        # Every confidence bucket negative in v6 (n=80), no confidence-
+        # conditional carve-out available (unlike BTCUSD above):
+        #   <0.05: avg=-0.26% (n=12)   0.05-0.20: avg=-1.04% (n=23)
+        #   0.20-0.50: avg=-1.18% (n=17)   >=0.50: avg=-1.11% (n=18)
+        if symbol == 'LINKUSD':
+            return (
+                'kronos_base_4h_short_link_blocked: '
+                'LINKUSD short — every confidence bucket negative in v6 '
+                '(n=80), no confidence level rescues it. (2026-09-08)'
+            )
 
         # ── Shorts: RVOL gate with confidence-based lower-bound override ─────
         rvol = RiskCheck._get_4h_rvol(symbol)
