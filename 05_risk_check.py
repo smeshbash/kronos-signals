@@ -1312,7 +1312,11 @@ class RiskCheck:
         SHORTS — per-symbol overrides (2026-09-08) applied before the two-gate
           filter below: BTCUSD confidence-gated (<0.50 blocked — WR/avg only
           turn positive at >=0.50, n=23); LINKUSD blocked outright (every
-          confidence bucket negative, n=80, no rescuable subset).
+          confidence bucket negative, n=80, no rescuable subset); BNBUSD
+          also blocked outright, though its data actually showed the same
+          improving-with-confidence shape as BTCUSD (>=0.50 bucket WR=66%,
+          n=29) — blocked per explicit decision, not because the evidence
+          demanded a full block the way LINKUSD's did.
 
         SHORTS — two-gate filter (all other symbols):
           (1) RVOL gate (primary):
@@ -1384,6 +1388,22 @@ class RiskCheck:
                 'kronos_base_4h_short_link_blocked: '
                 'LINKUSD short — every confidence bucket negative in v6 '
                 '(n=80), no confidence level rescues it. (2026-09-08)'
+            )
+
+        # ── Shorts: BNBUSD blocked entirely (2026-09-08, explicit call) ───────
+        # v6 breakdown (n=80): <0.05 avg=-1.43% (n=9), 0.05-0.20 avg=-0.56%
+        # (n=18), 0.20-0.50 avg=-0.79% (n=24), >=0.50 avg=+0.005% WR=66%
+        # (n=29) — the top bucket is close to breakeven-positive, unlike
+        # LINKUSD's uniformly-bad shape. Flagged as a confidence-floor
+        # candidate instead of a full block; blocked outright anyway per
+        # explicit instruction, not because the data demanded it.
+        if symbol == 'BNBUSD':
+            return (
+                'kronos_base_4h_short_bnb_blocked: '
+                'BNBUSD short blocked outright — v6 confidence buckets were '
+                'improving (<0.50 negative, >=0.50 WR=66%/avg~breakeven, '
+                'n=29) but blocked in full per explicit decision rather than '
+                'confidence-gated. (2026-09-08)'
             )
 
         # ── Shorts: RVOL gate with confidence-based lower-bound override ─────
