@@ -1194,7 +1194,9 @@ class RiskCheck:
           set) was never re-validated at scale. v6-only data (n=78 blocked)
           showed the opposite: WR=71.4%, total +52.46% directional return
           on the shorts it was suppressing. No daily-state condition on
-          mini-4h shorts is applied anymore (BTC symbol block still is).
+          mini-4h shorts is applied anymore. BTCUSD is confidence-gated
+          (<0.50 blocked, see below) and BNBUSD is blocked outright — both
+          added 2026-09-08.
 
         RVOL gate deliberately omitted: too thin historically to validate
         a volume filter; not revisited.
@@ -1232,15 +1234,37 @@ class RiskCheck:
                 )
             return None   # APPROVED: daily NOT up (flat/down)
 
-        # ── Shorts: BTCUSD blocked — model directionally wrong on BTC ───────
-        # v6 data: 10 SL, 0 TP on BTCUSD shorts. Signal-level directional
-        # accuracy 12.5% (n=8). Confirmed structurally wrong, not market-timing.
-        # (2026-08-30)
-        if symbol == 'BTCUSD':
+        # ── Shorts: BTCUSD confidence floor (2026-09-08, was blanket block) ──
+        # Original blanket block (2026-08-30): 10 SL, 0 TP, signal WR=12.5%
+        # (n=8) aggregate. Re-checked by confidence bucket in v6 (n=74):
+        #   <0.05:      WR=29%, avg=-0.39% (n=17)
+        #   0.05-0.20:  WR=47%, avg=-0.05% (n=32)
+        #   0.20-0.50:  WR=39%, avg=-1.01% (n=18)
+        #   >=0.50:     WR=71%, avg=+0.83% (n=7)  — the only positive bucket
+        # Loosened to a confidence floor rather than kept as a blanket block;
+        # n=7 in the surviving bucket is thin, re-check once it grows.
+        if symbol == 'BTCUSD' and confidence < 0.50:
             return (
-                'kronos_mini_4h_short_btc_blocked: '
-                'BTCUSD short WR=0% trade (10 SL, 0 TP), signal WR=12.5% (n=8) '
-                'in v6 — model directionally wrong on BTC shorts. (2026-08-30)'
+                f'kronos_mini_4h_short_btc_low_confidence_blocked: '
+                f'BTCUSD short confidence {confidence:.4f} < 0.50 — below-0.50 '
+                f'confidence WR<=47%, avg<=-0.05% in v6 (n=67); only >=0.50 '
+                f'(n=7) scored positive (WR=71%, avg=+0.83%). (2026-09-08)'
+            )
+
+        # ── Shorts: BNBUSD blocked entirely (2026-09-08) ─────────────────────
+        # Every confidence bucket negative in v6, and monotonically worsening
+        # as confidence rises — the opposite of what confidence should mean:
+        #   <0.05:      avg=-0.90% (n=28)
+        #   0.05-0.20:  avg=-1.07% (n=6)
+        #   0.20-0.50:  avg=-1.68% (n=10)
+        #   >=0.50:     avg=-2.42% (n=2, WR=0%)
+        # No confidence-conditional carve-out available (unlike BTCUSD above)
+        # — block the symbol outright.
+        if symbol == 'BNBUSD':
+            return (
+                'kronos_mini_4h_short_bnb_blocked: '
+                'BNBUSD short — every confidence bucket negative in v6 (n=46), '
+                'performance worsens as confidence rises. (2026-09-08)'
             )
 
         # ── Shorts: bullish-daily gate REMOVED (2026-09-08) ───────────────────
