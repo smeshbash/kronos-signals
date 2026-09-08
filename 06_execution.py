@@ -240,7 +240,7 @@ class Execution:
         self._scheduler = AsyncIOScheduler(timezone='UTC')
         self._scheduler.add_job(
             self._job_run,
-            CronTrigger(minute='*/10', timezone='UTC'),
+            CronTrigger(minute='3,13,23,33,43,53', timezone='UTC'),
             id='execution_cron',
             name='Execution — process approved signals (10min)',
             max_instances=1,
@@ -255,11 +255,18 @@ class Execution:
             # never revisited for the 4H models. Measured cost: signals
             # approved just after the hourly tick waited up to 59min for
             # execution, during which price moved against entry by +0.335%
-            # on average (n=15) and up to +2.9% in the worst case. */10
-            # caps worst-case wait at ~10min. No exchange-call cost increase
-            # when there's nothing approved (see _process_approved_signals'
-            # early return); position_monitor already polls the same
-            # exchange account 4x/hour without issue.
+            # on average (n=15) and up to +2.9% in the worst case. Every
+            # 10min caps worst-case wait at ~10min. No exchange-call cost
+            # increase when there's nothing approved (see
+            # _process_approved_signals' early return); position_monitor
+            # already polls the same exchange account 4x/hour without issue.
+            # Offset to :03/:13/.../:53 rather than the plain */10 grid to
+            # avoid landing on :05 or :30 — the two minutes M4/M16 and M15
+            # respectively run heavy inference on, :30 specifically chosen
+            # (15_mini_4h_generator.py) to stay isolated after the 2026-08-23
+            # OOM history (176 kills, zero signals, on the 7.6GB host).
+            # execution.py loads no ML model and has negligible RSS, so this
+            # is a precaution rather than a known necessity — but free to take.
             misfire_grace_time=120,
         )
         self._scheduler.start()
