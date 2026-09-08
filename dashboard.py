@@ -798,7 +798,8 @@ def get_data(f: dict) -> dict:
         SELECT id, symbol, direction, confidence, horizon, status,
                rejection_reason, predicted_return_pct, actual_return_pct,
                signal_timestamp, quality_flag, model_source,
-               COALESCE(regime_version, 1) regime_version
+               COALESCE(regime_version, 1) regime_version,
+               mfe_pct, mae_pct
         FROM signals
         WHERE 1=1 {sw}
         ORDER BY signal_timestamp DESC
@@ -1009,6 +1010,19 @@ def get_data(f: dict) -> dict:
         'mh_logs':    _gh_logs,
     }
 
+    # MFE/MAE by model + symbol + direction — for TP/SL calibration.
+    # Grouped over resolved signals only, all statuses (executed + rejected),
+    # respecting the same filter bar as the rest of the dashboard.
+    mfe_mae_raw = _q(f"""
+        SELECT model_source, symbol, direction,
+               COUNT(*) n, AVG(mfe_pct) avg_mfe, AVG(mae_pct) avg_mae
+        FROM signals
+        WHERE mfe_pct IS NOT NULL AND mae_pct IS NOT NULL {sw}
+        GROUP BY model_source, symbol, direction
+        HAVING COUNT(*) >= 3
+        ORDER BY model_source, symbol, direction
+    """, sp)
+
     return dict(
         pf=pf, model_pf=model_pf,
         gross=gross, net=net, tds=tds,
@@ -1038,6 +1052,7 @@ def get_data(f: dict) -> dict:
         pnl_week=_pnl_week,
         rolling_wr=rolling_wr,
         alert_event=alert_event,
+        mfe_mae_data=mfe_mae_raw,
         ts=int(time.time()),
     )
 
@@ -2460,10 +2475,15 @@ def _render_analysis_pane(d: dict, f: dict) -> str:
   </div>
   <div style="background:#fffae6;border:1px solid #ffe380;border-radius:5px;
               padding:7px 12px;margin:0 0 10px;font-size:.76rem;color:#172b4d">
-    <strong>&#9888; Calibration note:</strong>
-    Foundation models (Mini, Base) show an <em>inverse</em> correlation between confidence and accuracy —
-    higher confidence does NOT mean higher quality for these models. Only the Custom model has a positive correlation.
-    Do not use confidence as a signal filter for Mini/Base.
+    <strong>&#9888; Calibration note (updated 2026-09-09):</strong>
+    Confidence-vs-accuracy is not a model-wide relationship for the foundation
+    models — it's symbol-specific. Pooled across all symbols it looks flat or
+    inverse, but broken out per symbol, BTCUSD shows a clean, well-powered
+    staircase on both mini-4h and base-4h shorts (WR ~20% at low confidence up
+    to ~70% at &ge;0.50) — strong enough that a confidence floor is now gated
+    on it. XRPUSD mini-4h longs show the opposite: low confidence is uniquely
+    bad there, not elsewhere. Read this table per-symbol, not as one number
+    per model.
   </div>
   <div style="overflow-x:auto"><table>
     <thead><tr>{hdr}</tr></thead>
@@ -2475,7 +2495,52 @@ def _render_analysis_pane(d: dict, f: dict) -> str:
                     '<div class="empty">No resolved signals yet — calibration chart will appear after '
                     'signals mature past their horizon.</div></div>')
 
-    return matrix_html + two_col + cal_html
+    # ── 4. MFE / MAE by model + symbol + direction (TP/SL calibration) ────────
+    mm_rows_data = d.get('mfe_mae_data', [])
+    if mm_rows_data:
+        mm_rows = ''
+        for r in mm_rows_data:
+            avg_mfe = r['avg_mfe']
+            avg_mae = r['avg_mae']
+            ratio   = (avg_mfe / avg_mae) if avg_mae and avg_mae > 0 else None
+            ratio_str = f'{ratio:.2f}x' if ratio is not None else '—'
+            ratio_cls = 'pos' if (ratio is not None and ratio >= 1.0) else 'neg'
+            mm_rows += f"""<tr>
+  <td>{_model(r['model_source'] or 'custom')}</td>
+  <td><strong>{r['symbol']}</strong></td>
+  <td>{_dir(r['direction'])}</td>
+  <td style="text-align:right">{r['n']}</td>
+  <td style="text-align:right;color:#006644;font-weight:600">{avg_mfe:.3f}%</td>
+  <td style="text-align:right;color:#bf2600;font-weight:600">{avg_mae:.3f}%</td>
+  <td style="text-align:right" class="{ratio_cls}">{ratio_str}</td>
+</tr>"""
+        mfe_mae_html = f"""
+<div class="section">
+  <div class="section-hdr">MFE / MAE by Model &times; Asset &times; Direction
+    <span class="tag" style="font-size:.67rem;text-transform:none;font-weight:400">
+      Avg max favorable / adverse excursion over each signal's horizon &mdash; for TP/SL sizing
+    </span>
+  </div>
+  <div style="background:#deebff;border:1px solid #4c9aff;border-radius:5px;
+              padding:7px 12px;margin:0 0 10px;font-size:.76rem;color:#172b4d">
+    <strong>How to read this:</strong> the MFE/MAE ratio approximates the reward:risk
+    a TP/SL pair could realistically capture for that combination — a ratio near or
+    above 1.0x means the average favorable move was at least as large as the average
+    adverse move before either was realized. Rows below 3 signals are hidden.
+  </div>
+  <div style="overflow-x:auto"><table>
+    <thead><tr>
+      <th>Model</th><th>Symbol</th><th>Dir</th><th>n</th>
+      <th>Avg MFE</th><th>Avg MAE</th><th title="Avg MFE / Avg MAE">MFE:MAE</th>
+    </tr></thead>
+    <tbody>{mm_rows}</tbody>
+  </table></div>
+</div>"""
+    else:
+        mfe_mae_html = ('<div class="section"><div class="section-hdr">MFE / MAE by Model &times; Asset &times; Direction</div>'
+                         '<div class="empty">No MFE/MAE data yet — populates as signals mature past their horizon.</div></div>')
+
+    return matrix_html + two_col + cal_html + mfe_mae_html
 
 
 # ── Weekly trend table ────────────────────────────────────────────────────────
@@ -2599,6 +2664,15 @@ def _render_signals_pane(d: dict, f: dict, notice: str) -> str:
 
             mat = _maturity(s['signal_timestamp'], s.get('horizon'), status)
 
+            mfe = s.get('mfe_pct')
+            mae = s.get('mae_pct')
+            mfe_mae_str = (
+                f'<span style="color:#006644">{_pct(float(mfe))}</span> / '
+                f'<span style="color:#bf2600">{_pct(float(mae))}</span>'
+                if mfe is not None and mae is not None else
+                '<span class="neu" style="font-size:.7rem">pending</span>'
+            )
+
             rows += f"""<tr class="{row_cls}">
   <td class="tag">{_ts(s['signal_timestamp'])}</td>
   <td><strong>{s['symbol']}</strong></td>
@@ -2607,6 +2681,7 @@ def _render_signals_pane(d: dict, f: dict, notice: str) -> str:
   <td style="font-weight:600">{conf_str}</td>
   <td class="{pred_cls}">{pred_str}</td>
   <td>{actual_str}</td>
+  <td style="font-size:.8rem" title="Max favorable / adverse excursion over the signal's horizon">{mfe_mae_str}</td>
   <td>{_status(s['status'])}</td>
   <td class="tag" style="font-size:.7rem" title="{rr}">{rr_short}</td>
   <td style="font-size:.75rem">{mat}</td>
@@ -2717,7 +2792,7 @@ def _render_signals_pane(d: dict, f: dict, notice: str) -> str:
   <div style="overflow-x:auto"><table>
     <thead><tr>
       <th>Time (UTC)</th><th>Symbol</th><th>Model</th><th>Dir</th><th>Conf</th>
-      <th>Predicted</th><th>Actual</th><th>Status</th>
+      <th>Predicted</th><th>Actual</th><th title="Max favorable / adverse excursion over the signal's horizon">MFE / MAE</th><th>Status</th>
       <th>Rejection Reason</th><th>Maturity</th>
     </tr></thead>
     <tbody>{rows}</tbody>
@@ -2922,6 +2997,18 @@ def render(d: dict, f: dict) -> str:
     phase_lbl  = phase_map.get(PHASE, PHASE.replace('_', ' ').title())
     updated    = datetime.fromtimestamp(d['ts'], tz=timezone.utc).strftime('%d %b %H:%M UTC')
 
+    # Pulse pill — visible on every tab, answers "is this alive and doing
+    # something right now" without leaving whichever tab you're on. Full
+    # per-model health detail stays on the Generator Health cards (Summary).
+    _sigs_24h  = sum(int(v.get('total', 0)) for v in d.get('gen_health', {}).get('mh_24h', {}).values())
+    _open_pos  = len(d.get('positions', []))
+    pulse_pill = (f'<span class="pill" style="background:#e6fcf5;color:#006644" '
+                  f'title="Signals generated across all models, last 24h">'
+                  f'&#9679; {_sigs_24h} signals/24h</span>'
+                  f'<span class="pill" style="background:#deebff;color:#0052cc" '
+                  f'title="Currently open positions across all models">'
+                  f'{_open_pos} open position{"s" if _open_pos != 1 else ""}</span>')
+
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2940,6 +3027,7 @@ def render(d: dict, f: dict) -> str:
     {mode_pill}
     <span class="pill pill-regime">Regime v{SIGNAL_REGIME_VERSION}</span>
     <span class="pill pill-phase">{phase_lbl}</span>
+    {pulse_pill}
     <span>Updated {updated}</span>
     <span style="color:#dfe1e6">|</span>
     <span>Auto-refresh 30s</span>
