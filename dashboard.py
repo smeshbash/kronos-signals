@@ -816,6 +816,33 @@ def get_data(f: dict) -> dict:
     has_next_sig = len(sig_raw) > SIG_PAGE_SIZE
     sigs_list    = sig_raw[:SIG_PAGE_SIZE]
 
+    # Merge in each signal's own trade outcome (exit reason + P&L) so one row
+    # in Signal Explorer is the full picture — confidence, predicted/actual
+    # return, MFE/MAE, and what actually happened to the money — instead of
+    # having to cross-reference a separate trade table by hand. Done as a
+    # second query + Python merge, not a JOIN: signals and trades both have
+    # symbol/direction/status/quality_flag columns, which would collide with
+    # the bare column names _signal_where() generates for the WHERE clause.
+    _exec_ids = [s['id'] for s in sigs_list if s['status'] == 'executed']
+    if _exec_ids:
+        _ph = ','.join('?' * len(_exec_ids))
+        _trade_by_sig = {
+            t['signal_id']: t for t in _q(
+                f"""SELECT signal_id, exit_reason, pnl_net, entry_price, status AS trade_status
+                    FROM trades WHERE signal_id IN ({_ph})""",
+                _exec_ids,
+            )
+        }
+        for s in sigs_list:
+            tr = _trade_by_sig.get(s['id'])
+            s['exit_reason']   = tr['exit_reason']   if tr else None
+            s['pnl_net']       = tr['pnl_net']       if tr else None
+            s['entry_price']   = tr['entry_price']   if tr else None
+            s['trade_status']  = tr['trade_status']  if tr else None
+    else:
+        for s in sigs_list:
+            s['exit_reason'] = s['pnl_net'] = s['entry_price'] = s['trade_status'] = None
+
     # 6b. Signal accuracy breakdown (base filters only — sig_status excluded so stats
     #     are always the full picture even when a chip filter narrows the table view)
     # sw_base/sp_base computed once near the top of this function, reused here.
@@ -2705,6 +2732,27 @@ def _render_signals_pane(d: dict, f: dict, notice: str) -> str:
                 '<span class="neu" style="font-size:.7rem">pending</span>'
             )
 
+            # Trade outcome — what actually happened to the money, for signals
+            # that were executed. Ties confidence/predicted/actual/MFE-MAE to
+            # the real exit in the same row, instead of a separate trade table
+            # elsewhere with no visible link back to the signal that caused it.
+            pnl_net     = s.get('pnl_net')
+            exit_reason = s.get('exit_reason')
+            if status != 'executed':
+                outcome_str = '<span class="neu" style="font-size:.7rem">n/a</span>'
+            elif pnl_net is None:
+                trade_status = s.get('trade_status')
+                outcome_str = ('<span class="neu" style="font-size:.7rem">open</span>'
+                               if trade_status == 'open' else
+                               '<span class="neu" style="font-size:.7rem">pending</span>')
+            else:
+                pnl_f     = float(pnl_net)
+                pnl_cls   = 'pos' if pnl_f >= 0 else 'neg'
+                exit_lbl  = str(exit_reason or '').replace('_', ' ').title() or '—'
+                outcome_str = (f'<div style="font-size:.7rem;color:#5e6c84">{exit_lbl}</div>'
+                               f'<div class="{pnl_cls}" style="font-weight:600">'
+                               f'{"+" if pnl_f >= 0 else ""}&#8377;{pnl_f:,.0f}</div>')
+
             rows += f"""<tr class="{row_cls}">
   <td class="tag">{_ts(s['signal_timestamp'])}</td>
   <td><strong>{s['symbol']}</strong></td>
@@ -2714,6 +2762,7 @@ def _render_signals_pane(d: dict, f: dict, notice: str) -> str:
   <td class="{pred_cls}">{pred_str}</td>
   <td>{actual_str}</td>
   <td style="font-size:.8rem" title="Max favorable / adverse excursion over the signal's horizon">{mfe_mae_str}</td>
+  <td title="Exit reason and realized P&amp;L for this signal's trade, if executed">{outcome_str}</td>
   <td>{_status(s['status'])}</td>
   <td class="tag" style="font-size:.7rem" title="{rr}">{rr_short}</td>
   <td style="font-size:.75rem">{mat}</td>
@@ -2824,7 +2873,8 @@ def _render_signals_pane(d: dict, f: dict, notice: str) -> str:
   <div style="overflow-x:auto"><table>
     <thead><tr>
       <th>Time (UTC)</th><th>Symbol</th><th>Model</th><th>Dir</th><th>Conf</th>
-      <th>Predicted</th><th>Actual</th><th title="Max favorable / adverse excursion over the signal's horizon">MFE / MAE</th><th>Status</th>
+      <th>Predicted</th><th>Actual</th><th title="Max favorable / adverse excursion over the signal's horizon">MFE / MAE</th>
+      <th title="Exit reason and realized P&amp;L for this signal's trade, if executed">Trade Outcome</th><th>Status</th>
       <th>Rejection Reason</th><th>Maturity</th>
     </tr></thead>
     <tbody>{rows}</tbody>
