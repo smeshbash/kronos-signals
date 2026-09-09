@@ -492,15 +492,23 @@ def get_data(f: dict) -> dict:
     history  = history_raw[:PAGE_SIZE]
 
     # ── Signal pipeline (filtered, last 50) ────────────────────────────────────
-    sw, sp = _signal_where(f)
+    # sw/sp include sig_status (the Signal Explorer's own hit/miss/rejected
+    # chip filter) — that's correct for the Explorer's own row listing, but
+    # every OTHER aggregate stat below (matrix accuracy, calibration, MFE/MAE)
+    # must NOT inherit it, or "accuracy per confidence band" becomes
+    # tautologically 100% whenever a chip like sig_status=hit is set, since
+    # only already-correct rows would remain to compute the % from. sw_base
+    # strips it for exactly those "overall picture" queries.
+    sw, sp           = _signal_where(f)
+    sw_base, sp_base = _signal_where({**f, 'sig_status': ''})
     pipeline = _q(f"""
         SELECT id, symbol, direction, confidence, horizon, status,
                rejection_reason, predicted_return_pct, actual_return_pct,
                signal_timestamp, quality_flag, model_source
         FROM signals
-        WHERE 1=1 {sw}
+        WHERE 1=1 {sw_base}
         ORDER BY signal_timestamp DESC LIMIT 50
-    """, sp)
+    """, sp_base)
 
     # ── Ops: model accuracy ───────────────────────────────────────────────────
     _MODEL_HZ = {
@@ -594,8 +602,8 @@ def get_data(f: dict) -> dict:
     dir_acc_raw = _q(f"""
         SELECT COALESCE(model_source,'custom') ms, symbol, direction, actual_return_pct
         FROM signals
-        WHERE actual_return_pct IS NOT NULL AND quality_flag IS NULL {sw}
-    """, sp)
+        WHERE actual_return_pct IS NOT NULL AND quality_flag IS NULL {sw_base}
+    """, sp_base)
     matrix_acc = defaultdict(lambda: defaultdict(lambda: {'c': 0, 't': 0}))
     for r in dir_acc_raw:
         ms  = r['ms'] or 'custom'
@@ -740,8 +748,8 @@ def get_data(f: dict) -> dict:
                direction, confidence, actual_return_pct
         FROM signals
         WHERE actual_return_pct IS NOT NULL AND quality_flag IS NULL
-          AND confidence IS NOT NULL {sw}
-    """, sp)
+          AND confidence IS NOT NULL {sw_base}
+    """, sp_base)
     # Pre-initialise all known models so table shows every column
     cal_data: dict = {mk: [{'c': 0, 't': 0} for _ in _CONF_BANDS]
                       for mk, *_ in _MODEL_OPTS}
@@ -810,7 +818,7 @@ def get_data(f: dict) -> dict:
 
     # 6b. Signal accuracy breakdown (base filters only — sig_status excluded so stats
     #     are always the full picture even when a chip filter narrows the table view)
-    sw_base, sp_base = _signal_where({**f, 'sig_status': ''})
+    # sw_base/sp_base computed once near the top of this function, reused here.
     _raw_acc = _q(f"""
         SELECT status, direction,
                CASE WHEN actual_return_pct IS NULL THEN 'unresolved'
@@ -1017,11 +1025,11 @@ def get_data(f: dict) -> dict:
         SELECT model_source, symbol, direction,
                COUNT(*) n, AVG(mfe_pct) avg_mfe, AVG(mae_pct) avg_mae
         FROM signals
-        WHERE mfe_pct IS NOT NULL AND mae_pct IS NOT NULL {sw}
+        WHERE mfe_pct IS NOT NULL AND mae_pct IS NOT NULL {sw_base}
         GROUP BY model_source, symbol, direction
         HAVING COUNT(*) >= 3
         ORDER BY model_source, symbol, direction
-    """, sp)
+    """, sp_base)
 
     return dict(
         pf=pf, model_pf=model_pf,
@@ -2303,6 +2311,8 @@ def _render_summary_pane(d: dict, f: dict, notice: str) -> str:
 
 # ── Tab 2: Analysis pane ──────────────────────────────────────────────────────
 
+_THIN_N = 5   # below this, a % is too noisy to color-code as good/bad
+
 def _mx_cell(wr_data: dict, acc_data: dict, sym: str) -> str:
     n    = wr_data.get('n',    0)
     wins = wr_data.get('wins', 0)
@@ -2312,22 +2322,33 @@ def _mx_cell(wr_data: dict, acc_data: dict, sym: str) -> str:
     if n == 0 and at == 0:
         return '<td class="mx-cell mx-none"><span style="color:#97a0af">—</span></td>'
 
-    # Trade win rate
+    # Trade win rate — thin samples (n < _THIN_N) shown muted, not color-coded,
+    # so a single lucky trade doesn't read with the same weight as a real result.
     wr_str = ''
     if n > 0:
         wr = wins / n * 100
-        wr_cls = 'pos' if wr >= 60 else ('warn' if wr >= 45 else 'neg')
-        wr_str = f'<div class="mx-val {wr_cls}">{wr:.0f}%</div><div class="mx-sub">{n} trades</div>'
-        cell_cls = 'mx-hit' if wr >= 60 else ('mx-warn' if wr >= 45 else 'mx-miss')
+        thin = n < _THIN_N
+        if thin:
+            wr_cls = 'neu'
+            wr_str = (f'<div class="mx-val" style="color:#97a0af">{wr:.0f}%</div>'
+                      f'<div class="mx-sub">{n} trade{"s" if n != 1 else ""} &mdash; thin</div>')
+            cell_cls = 'mx-none'
+        else:
+            wr_cls = 'pos' if wr >= 60 else ('warn' if wr >= 45 else 'neg')
+            wr_str = f'<div class="mx-val {wr_cls}">{wr:.0f}%</div><div class="mx-sub">{n} trades</div>'
+            cell_cls = 'mx-hit' if wr >= 60 else ('mx-warn' if wr >= 45 else 'mx-miss')
     else:
         cell_cls = 'mx-none'
 
-    # Directional accuracy
+    # Directional accuracy — same thin-sample treatment
     acc_str = ''
     if at > 0:
         ap = ac / at * 100
-        acc_cls = 'pos' if ap >= 55 else ('warn' if ap >= 45 else 'neg')
-        acc_str = f'<div class="mx-sub" style="margin-top:3px;color:#5e6c84">Dir: <span class="{acc_cls}" style="font-weight:600">{ap:.0f}%</span> / {at}s</div>'
+        if at < _THIN_N:
+            acc_str = f'<div class="mx-sub" style="margin-top:3px;color:#97a0af">Dir: {ap:.0f}% / {at}s &mdash; thin</div>'
+        else:
+            acc_cls = 'pos' if ap >= 55 else ('warn' if ap >= 45 else 'neg')
+            acc_str = f'<div class="mx-sub" style="margin-top:3px;color:#5e6c84">Dir: <span class="{acc_cls}" style="font-weight:600">{ap:.0f}%</span> / {at}s</div>'
 
     return f'<td class="mx-cell {cell_cls}">{wr_str}{acc_str}</td>'
 
@@ -2583,6 +2604,13 @@ def _render_weekly_trend(weekly_trend: dict) -> str:
             c, t = v['c'], v['t']
             if t == 0:
                 rows += '<td style="text-align:center;color:#97a0af">—</td>'
+            elif t < _THIN_N:
+                # Too few resolved signals this week to color-code as good/bad —
+                # a single win reading as a vivid "100%" cell is misleading.
+                pct = c / t * 100
+                rows += (f'<td style="text-align:center;padding:6px 4px">'
+                         f'<span style="font-weight:600;color:#97a0af">{pct:.0f}%</span>'
+                         f'<br><span style="font-size:.63rem;color:#97a0af">n={t} thin</span></td>')
             else:
                 pct = c / t * 100
                 if pct >= 55:
