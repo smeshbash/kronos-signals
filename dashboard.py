@@ -2476,14 +2476,18 @@ def _render_analysis_pane(d: dict, f: dict) -> str:
   <div style="background:#fffae6;border:1px solid #ffe380;border-radius:5px;
               padding:7px 12px;margin:0 0 10px;font-size:.76rem;color:#172b4d">
     <strong>&#9888; Calibration note (updated 2026-09-09):</strong>
-    Confidence-vs-accuracy is not a model-wide relationship for the foundation
-    models — it's symbol-specific. Pooled across all symbols it looks flat or
-    inverse, but broken out per symbol, BTCUSD shows a clean, well-powered
-    staircase on both mini-4h and base-4h shorts (WR ~20% at low confidence up
-    to ~70% at &ge;0.50) — strong enough that a confidence floor is now gated
-    on it. XRPUSD mini-4h longs show the opposite: low confidence is uniquely
-    bad there, not elsewhere. Read this table per-symbol, not as one number
-    per model.
+    The table below pools every symbol per model, and pooled that way the
+    relationship is noisy — it doesn't rise or fall cleanly in either
+    direction for any model. That's expected, not a dead end: broken out
+    per symbol instead, BTCUSD shows a clean, well-powered confidence
+    staircase on both mini-4h and base-4h shorts (WR ~20-30% at low
+    confidence up to ~70% at &ge;0.50) — strong enough that a confidence
+    floor is now gated on it for both. XRPUSD mini-4h longs show the
+    opposite pattern: low confidence is uniquely bad there, not elsewhere.
+    Neither of those symbol-specific effects is visible in the pooled
+    numbers below — treat this table as a starting point, not the final
+    word, and check per-symbol before concluding confidence doesn't matter
+    for a model.
   </div>
   <div style="overflow-x:auto"><table>
     <thead><tr>{hdr}</tr></thead>
