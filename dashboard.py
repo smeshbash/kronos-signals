@@ -46,7 +46,7 @@ _HIT_THR = 0.15   # %
 
 # Ordered list of known model sources — drives filter chips, cards, analysis views.
 _MODEL_OPTS = [
-    ('custom',         'Custom',   'b-gold',    '#7a5200'),   # active — see rolling WR gate for shorts
+    ('custom',         'Custom ⊘', 'b-gold',    '#7a5200'),   # execution halted 2026-09-10 — net-negative in all 5 regimes run
     ('kronos-mini',    'Mini 1H',  'b-blue',    '#0747a6'),
     ('kronos-base',    'Base 1H',  'b-purple',  '#403294'),
     ('kronos-mini-4h', 'Mini 4H',  'b-teal',    '#087f5b'),
@@ -1718,7 +1718,7 @@ _GH_MODELS = [
     ('kronos-base',    'M14 · kronos-base · 1H',   3600,  True,  'Disabled in code — DISABLED_MODEL_SOURCES (2026-06-09)', '/var/log/kronos/14_base_generator.err'),
     ('kronos-mini-4h', 'M15 · kronos-mini · 4H',  14400,  False, '',                                         '/var/log/kronos/15_mini_4h_generator.err'),
     ('kronos-base-4h', 'M16 · kronos-base · 4H',  14400,  False, '',                                         '/var/log/kronos/16_base_4h_generator.err'),
-    ('custom',         'M04 · custom · 1H',         3600,  False, '',                                         '/var/log/kronos/04_signal_generator.err'),
+    ('custom',         'M04 · custom · 1H',         3600,  True,  'Disabled in code — DISABLED_MODEL_SOURCES (2026-09-10): net-negative in all 5 regimes run, all-time -14,557.45', '/var/log/kronos/04_signal_generator.err'),
 ]
 
 _GH_REASON_MAP = [

@@ -166,7 +166,28 @@ MIN_CONFIDENCE_BY_SOURCE: dict = {
 #   kronos-mini (117 shorts) drives all positive EV in pooled analysis; kronos-base
 #   adds no edge. Signal generator continues running to accumulate v5 data.
 #   Re-evaluate when kronos-base has 50+ resolved short signals in v5.
-DISABLED_MODEL_SOURCES: frozenset = frozenset({'kronos-base','kronos-mini'})
+#
+# custom execution halted 2026-09-10 — net-negative in every regime it has run in:
+#   All-time real trade P&L across 5 regimes (v4 excluded, halted that whole regime):
+#     v1 n=10 WR=40.0% net=-1,201.96 | v2 n=5 WR=0.0% net=-826.41
+#     v3 n=23 WR=13.0% net=-10,195.40 | v5 n=46 WR=39.1% net=-977.43
+#     v6 n=18 WR=33.3% net=-1,356.25 | ALL-TIME n=102 net=-14,557.45
+#   Zero of 5 regimes profitable, including the one (v4) it was previously halted
+#   and reactivated for — the reactivation did not change the underlying pattern.
+#   Only 6.5% of v6 signals (20/309) ever reach execution; the rest are absorbed by
+#   custom's own gates (custom_long_daily_not_up, rolling_wr_block chief among them).
+#   This session's fixes (n_agree hard-block 98a6ca6, rolling WR widening 6d76937,
+#   long-gate reversal c0e6c20) show no measurable improvement in the post-fix
+#   window (n=7, WR=28.6%, net=-821.25) versus pre-fix (n=10, WR=30.0%,
+#   net=-719.73) — too early to credit or blame them either way (n=1 since the
+#   most recent fix). Worst all-time P&L of the three live models (mini-4h
+#   -8,539.59, base-4h +488.03 — the only one ever net positive) and the heaviest
+#   generator process by memory (04_signal_generator.py ~991MB RSS, 12.6% of host,
+#   vs mini-4h ~399MB and base-4h ~690MB) on a host with a prior OOM history.
+#   Signal generator left running (see comment above) so v6+ data keeps
+#   accumulating — re-evaluate from fresh data if reconsidered, don't need to
+#   cold-start the model.
+DISABLED_MODEL_SOURCES: frozenset = frozenset({'kronos-base','kronos-mini','custom'})
 
 # A pending signal older than this is expired, not rejected (Section 10.1: 4H entry timeout)
 SIGNAL_EXPIRY_SECONDS = 4 * 3600
