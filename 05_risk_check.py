@@ -184,9 +184,14 @@ MIN_CONFIDENCE_BY_SOURCE: dict = {
 #   -8,539.59, base-4h +488.03 — the only one ever net positive) and the heaviest
 #   generator process by memory (04_signal_generator.py ~991MB RSS, 12.6% of host,
 #   vs mini-4h ~399MB and base-4h ~690MB) on a host with a prior OOM history.
-#   Signal generator left running (see comment above) so v6+ data keeps
-#   accumulating — re-evaluate from fresh data if reconsidered, don't need to
-#   cold-start the model.
+#   Unlike the kronos-base/kronos-mini precedent above, the signal generator
+#   itself (kronos-signal-generator supervisor process) is also STOPPED, not
+#   left running — the resource cost was part of the decommission case, so
+#   paying it anyway just to keep discarding signals at this gate defeats the
+#   point. This DISABLED_MODEL_SOURCES entry stays as a second layer of
+#   protection (belt-and-suspenders) in case the process is ever started
+#   again without this line being reverted first. To reconsider: remove
+#   'custom' below AND `supervisorctl start kronos-signal-generator`.
 DISABLED_MODEL_SOURCES: frozenset = frozenset({'kronos-base','kronos-mini','custom'})
 
 # A pending signal older than this is expired, not rejected (Section 10.1: 4H entry timeout)
