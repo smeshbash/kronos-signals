@@ -2052,9 +2052,9 @@ def _render_summary_pane(d: dict, f: dict, notice: str) -> str:
     filter_note = ' (filtered)' if fc else ''
     agg_gross = f"""
   <div class="card">
-    <div class="card-lbl">Combined P&amp;L{filter_note} &mdash; {d['n']} trades</div>
-    <div class="card-val {_gain(d['gross'])}">{_inr(d['gross'])}</div>
-    <div class="card-sub neu">Net: {_inr(d['net'])}
+    <div class="card-lbl">Combined P&amp;L (net){filter_note} &mdash; {d['n']} trades</div>
+    <div class="card-val {_gain(d['net'])}">{_inr(d['net'])}</div>
+    <div class="card-sub neu" title="Before fees/funding/TDS — reference only, not the real result">Gross: {_inr(d['gross'])}
       &nbsp;&nbsp;TDS: &#8377;{d['tds']:,.2f}</div>
   </div>"""
     agg_wr = f"""
@@ -2129,6 +2129,8 @@ def _render_summary_pane(d: dict, f: dict, notice: str) -> str:
             ep     = _f(t['entry_price'])
             xp     = _f(t['exit_price'])
             g      = _f(t['pnl_gross'])
+            net_v  = t.get('pnl_net')
+            net_p  = _f(net_v, g)   # unsettled trades (M9 hasn't run yet) show gross as a stopgap
             sz     = _f(t['size_contracts'])
             reason = str(t.get('exit_reason') or '--').replace('_', ' ')
             conf   = t.get('confidence')
@@ -2165,7 +2167,7 @@ def _render_summary_pane(d: dict, f: dict, notice: str) -> str:
   <td>{_model(t.get('model_source') or 'custom')}</td>
   <td style="font-size:.82rem"><strong>{sz:,.6f}</strong></td>
   <td class="tag">${ep:,.2f} &rarr; ${xp:,.2f}</td>
-  <td class="{_gain(g)}">{_inr(g)}</td>
+  <td class="{_gain(net_p)}">{_inr(net_p)}<br><span class="tag" style="font-size:.68rem" title="Before fees/funding/TDS">Gross {_inr(g)}</span></td>
   <td class="pos" style="font-size:.8rem">{pk_cell}</td>
   <td class="neg" style="font-size:.8rem">{tr_cell}</td>
   <td style="font-size:.76rem;line-height:1.4">{outcome}</td>
@@ -2189,7 +2191,7 @@ def _render_summary_pane(d: dict, f: dict, notice: str) -> str:
   <div class="section-hdr">Trade History{hist_sfx} <span class="count">{showing}</span></div>
   <div style="overflow-x:auto"><table>
     <thead><tr><th>Closed (UTC)</th><th>Symbol</th><th>Dir</th><th>Model</th><th>Size</th>
-    <th>Entry &rarr; Exit</th><th>Gross P&amp;L</th><th>Peak</th><th>Trough</th>
+    <th>Entry &rarr; Exit</th><th>Net P&amp;L</th><th>Peak</th><th>Trough</th>
     <th>Signal / Outcome</th><th>Closed Because</th></tr></thead>
     <tbody>{rows}</tbody></table></div>
   {pag_html}
