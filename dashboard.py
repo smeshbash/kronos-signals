@@ -750,8 +750,13 @@ def get_data(f: dict) -> dict:
     tax_reserve_balance = _f(_tax_row[0]['balance_after']) if _tax_row else 0.0
     distributable = net - tax_reserve_balance
 
+    # Gross reference alongside the (mandatory) net NAV figure — same `gross`
+    # aggregate used by the Summary tab's cards, kept for consistency so the
+    # Fund tab isn't the one place that shows only one side of the number.
+    fund_gross_return_pct = (gross / fund_start_capital * 100) if fund_start_capital else 0.0
     fund_data = dict(
         nav=fund_nav, start_capital=fund_start_capital, return_pct=fund_return_pct,
+        gross_return_pct=fund_gross_return_pct,
         risk=risk_metrics, vs_btc=fund_vs_btc, btc_return_pct=btc_return_pct,
         tax_reserve=tax_reserve_balance, distributable=distributable,
     )
@@ -1646,6 +1651,7 @@ def _render_fund_pane(d: dict, f: dict) -> str:
     nav    = fund.get('nav', 0.0)
     start  = fund.get('start_capital', 0.0)
     ret    = fund.get('return_pct', 0.0)
+    gross_ret = fund.get('gross_return_pct', 0.0)
     btc    = fund.get('btc_return_pct', 0.0)
     cur_dd = d.get('cur_dd', 0.0)
     max_dd = d.get('max_dd', 0.0)
@@ -1668,7 +1674,9 @@ def _render_fund_pane(d: dict, f: dict) -> str:
   <div class="card" style="border-top:3px solid #0052cc">
     <div class="card-lbl">Fund NAV — {len(_MODEL_OPTS)} pools combined</div>
     <div class="card-val">&#8377;{nav:,.0f}</div>
-    <div class="card-sub {_gain(ret)}">{"+" if ret>=0 else ""}{ret:.2f}% from &#8377;{start:,.0f}</div>
+    <div class="card-sub {_gain(ret)}">{"+" if ret>=0 else ""}{ret:.2f}% net from &#8377;{start:,.0f}
+      &nbsp;&mdash;&nbsp;<span class="neu" style="font-weight:600" title="Before fees/funding/TDS — reference only, not the real balance">Gross {"+" if gross_ret>=0 else ""}{gross_ret:.2f}%</span>
+    </div>
   </div>
   <div class="card">
     <div class="card-lbl">Fund Return vs BTC Buy-and-Hold</div>
