@@ -410,19 +410,24 @@ def get_data(f: dict) -> dict:
         prow = (_q(f"""SELECT COALESCE(SUM(t.pnl_gross), 0) AS gross,
                               COALESCE(SUM(t.pnl_net),   0) AS net,
                               COUNT(*) AS n,
-                              COALESCE(SUM(CASE WHEN t.pnl_gross>0 THEN 1 ELSE 0 END), 0) AS wins
+                              COALESCE(SUM(CASE WHEN COALESCE(t.pnl_net, t.pnl_gross)>0 THEN 1 ELSE 0 END), 0) AS wins
                        FROM trades t JOIN signals s ON t.signal_id=s.id
                        WHERE t.status='closed' AND t.quality_flag IS NULL
                          AND s.model_source=? {tw_m}""",
                    (_mk,) + tuple(tp_m)) or [{}])[0]
         gross = _f(prow.get('gross'))
-        total = START + gross
+        net   = _f(prow.get('net'))
+        # Headline "Capital" figure must be net (real fees/funding/TDS already
+        # deducted) — the real balance from portfolio_snapshots.total_value
+        # when available, falling back to START+net (not START+gross) so an
+        # unfunded regime with no snapshot yet still shows the honest number.
+        total = _f(row.get('total_value'), START + net)
         model_pf[_mk] = {
             'total': total,
             'chg':   total - START,
             'dd':    _f(row.get('drawdown_pct')),
             'gross': gross,
-            'net':   _f(prow.get('net')),
+            'net':   net,
             'n':     int(_f(prow.get('n'))),
             'wins':  int(_f(prow.get('wins'))),
         }
@@ -444,7 +449,9 @@ def get_data(f: dict) -> dict:
     net    = sum(_f(r['pnl_net'])      for r in closed)
     tds    = sum(_f(r['tds_deducted']) for r in closed)
     n      = len(closed)
-    wins   = sum(1 for r in closed if _f(r['pnl_gross']) > 0)
+    # Net-based: a trade that's gross-positive but a net loss after fees/
+    # funding/TDS is not a "win" (2026-09-12 fix, same issue as capital cards).
+    wins   = sum(1 for r in closed if _f(r['pnl_net'], _f(r['pnl_gross'])) > 0)
     losses = n - wins
     wr     = wins / n * 100 if n else 0.0
 
@@ -588,7 +595,8 @@ def get_data(f: dict) -> dict:
     # 1. Model × Asset matrix — trade win rates
     matrix_raw = _q(f"""
         SELECT COALESCE(s.model_source,'custom') ms, t.symbol,
-               COUNT(*) n, SUM(CASE WHEN t.pnl_gross>0 THEN 1 ELSE 0 END) wins
+               COUNT(*) n,
+               SUM(CASE WHEN COALESCE(t.pnl_net, t.pnl_gross)>0 THEN 1 ELSE 0 END) wins
         FROM trades t LEFT JOIN signals s ON t.signal_id=s.id
         WHERE t.status='closed' AND t.quality_flag IS NULL {tw}
         GROUP BY ms, t.symbol
@@ -621,10 +629,16 @@ def get_data(f: dict) -> dict:
         {r['symbol'] for r in dir_acc_raw}
     )
 
-    # 3. Equity curves — cumulative gross P&L per model
+    # 3. Equity curves — cumulative NET P&L per model. Was gross until
+    # 2026-09-12: a gross-only equity curve systematically overstates
+    # performance (no fees/funding/TDS drag) and can show capital trending
+    # up on this chart while the real, net-based Fund NAV shows a loss —
+    # exactly the discrepancy that prompted this fix. COALESCE falls back to
+    # gross only for trades M9 hasn't settled pnl_net for yet (matches the
+    # same convention used for the real capital balance elsewhere).
     eq_raw = _q(f"""
         SELECT COALESCE(s.model_source,'custom') ms,
-               t.exit_timestamp ts, t.pnl_gross pnl
+               t.exit_timestamp ts, COALESCE(t.pnl_net, t.pnl_gross) pnl
         FROM trades t LEFT JOIN signals s ON t.signal_id=s.id
         WHERE t.status='closed' AND t.quality_flag IS NULL {tw}
         ORDER BY t.exit_timestamp ASC
@@ -789,7 +803,7 @@ def get_data(f: dict) -> dict:
     fg = _funnel_count('')
     fp = _funnel_count("AND status != 'rejected'")
     fe = _trade_count('')
-    fw = _trade_count('AND t.pnl_gross > 0')
+    fw = _trade_count('AND COALESCE(t.pnl_net, t.pnl_gross) > 0')
 
     funnel_data: dict = {}
     for mk, *_ in _MODEL_OPTS:
@@ -944,15 +958,19 @@ def get_data(f: dict) -> dict:
     # P&L over last 24H and last 7 days — scoped to selected regime
     _now_ts    = int(time.time())
     _pnl_regime = f.get('regime', SIGNAL_REGIME_VERSION)
+    # Net, not gross — same fix as the capital cards and equity curve
+    # (2026-09-12): these headline P&L figures must reflect real fees/
+    # funding/TDS, not a frictionless number that can show a gain here
+    # while the real balance is down.
     _pnl_today = _f((_q(
-        "SELECT COALESCE(SUM(t.pnl_gross),0) AS g FROM trades t"
+        "SELECT COALESCE(SUM(COALESCE(t.pnl_net, t.pnl_gross)),0) AS g FROM trades t"
         " JOIN signals s ON s.id = t.signal_id"
         " WHERE t.status='closed' AND t.quality_flag IS NULL"
         " AND t.exit_timestamp >= ?"
         " AND COALESCE(s.regime_version, 1) = ?",
         (_now_ts - 86400, _pnl_regime)) or [{'g': 0}])[0]['g'])
     _pnl_week  = _f((_q(
-        "SELECT COALESCE(SUM(t.pnl_gross),0) AS g FROM trades t"
+        "SELECT COALESCE(SUM(COALESCE(t.pnl_net, t.pnl_gross)),0) AS g FROM trades t"
         " JOIN signals s ON s.id = t.signal_id"
         " WHERE t.status='closed' AND t.quality_flag IS NULL"
         " AND t.exit_timestamp >= ?"
@@ -2003,11 +2021,11 @@ def _render_summary_pane(d: dict, f: dict, notice: str) -> str:
     model_cards_html = ''
     for _mk, (_mlabel, _mbadge_cls, _mbadge_color) in _model_cfg.items():
         mp   = d['model_pf'].get(_mk, {})
-        mv   = mp.get('total', START)
-        mchg = mp.get('chg',   0.0)
-        mg   = mp.get('gross', 0.0)
+        mv   = mp.get('total', START)      # net-based — real balance
+        mchg = mp.get('chg',   0.0)        # net-based
+        mg   = mp.get('gross', 0.0)        # reference only, fees/funding NOT deducted
         mn   = mp.get('n',     0)
-        mw   = mp.get('wins',  0)
+        mw   = mp.get('wins',  0)          # net-based win count
         ml   = mn - mw
         mwr  = mw / mn * 100 if mn else 0.0
         mwr_c = '#36b37e' if mwr >= 50 else ('#6b778c' if mn == 0 else '#ff5630')
@@ -2019,11 +2037,11 @@ def _render_summary_pane(d: dict, f: dict, notice: str) -> str:
       &nbsp;Capital
     </div>
     <div class="card-val">&#8377;{mv:,.0f}</div>
-    <div class="card-sub {_gain(mchg)}">{"+" if mchg >= 0 else ""}&#8377;{mchg:,.2f} from &#8377;{START:,.0f}
-      &nbsp;&mdash;&nbsp;<span class="{'pos' if mg>=0 else 'neg'}" style="font-weight:600">Gross {_inr(mg)}</span>
+    <div class="card-sub {_gain(mchg)}">{"+" if mchg >= 0 else ""}&#8377;{mchg:,.2f} net from &#8377;{START:,.0f}
+      &nbsp;&mdash;&nbsp;<span class="neu" style="font-weight:600" title="Before fees/funding/TDS — reference only, not the real balance">Gross {_inr(mg)}</span>
     </div>
     <div class="card-sub neu" style="margin-top:3px">{mn} trade{'s' if mn!=1 else ''}
-      &nbsp;&nbsp;<span style="color:{mwr_c};font-weight:600">{mwr:.0f}% WR</span>
+      &nbsp;&nbsp;<span style="color:{mwr_c};font-weight:600" title="Win = net-positive after fees/funding/TDS">{mwr:.0f}% WR</span>
       &nbsp;({mw}W/{ml}L)</div>
   </div>"""
 
@@ -2264,7 +2282,7 @@ def _render_summary_pane(d: dict, f: dict, notice: str) -> str:
     # ── P&L headline strip ────────────────────────────────────────────────────
     _pt = d.get('pnl_today', 0.0)
     _pw = d.get('pnl_week',  0.0)
-    _pa = d.get('gross', 0.0)
+    _pa = d.get('net', 0.0)
     pnl_strip = f"""
 <div style="display:flex;gap:0;border:1px solid #dfe1e6;border-radius:8px;
             overflow:hidden;margin-bottom:14px;font-size:.8rem">
@@ -2277,7 +2295,7 @@ def _render_summary_pane(d: dict, f: dict, notice: str) -> str:
     <div style="font-size:1.15rem;font-weight:700" class="{_gain(_pw)}">{_inr(_pw)}</div>
   </div>
   <div style="flex:1;padding:10px 16px;border-right:1px solid #dfe1e6">
-    <div style="color:#6b778c;margin-bottom:2px;font-size:.72rem;text-transform:uppercase;letter-spacing:.04em">All-time Gross</div>
+    <div style="color:#6b778c;margin-bottom:2px;font-size:.72rem;text-transform:uppercase;letter-spacing:.04em">All-time Net</div>
     <div style="font-size:1.15rem;font-weight:700" class="{_gain(_pa)}">{_inr(_pa)}</div>
   </div>
   <div style="flex:1;padding:10px 16px">
@@ -2422,7 +2440,11 @@ def _render_analysis_pane(d: dict, f: dict) -> str:
     # ── 2. Equity curves + Rejection funnel ───────────────────────────────────
     eq_chart_html = """
 <div class="section">
-  <div class="section-hdr">Equity Curves — Cumulative Gross P&amp;L</div>
+  <div class="section-hdr">Equity Curves — Cumulative Net P&amp;L
+    <span class="tag" style="font-size:.67rem;text-transform:none;font-weight:400">
+      after fees, funding, TDS — matches the real capital balance shown elsewhere
+    </span>
+  </div>
   <div class="chart-wrap"><canvas id="equity-chart"></canvas></div>
 </div>"""
 
