@@ -2461,15 +2461,30 @@ async def main() -> None:
 
     scheduler.add_job(
         _job,
-        CronTrigger(minute=12, timezone='UTC'),
+        # 2026-09-11: tightened from hourly (minute=12) — same class of bug
+        # already found and fixed in 06_execution.py's cron (f93ad4e/aaa20f3),
+        # but never checked here even though risk_check is the ONLY thing that
+        # moves a signal out of 'pending'. A signal generated just after :12
+        # sat unevaluated for up to 59min, on top of which base-4h's own
+        # multi-symbol generation lag (documented in 15/16_*_generator.py —
+        # LINK/XRP can finish 20-30min after signal_timestamp) meant some
+        # signals weren't even in the DB yet when the hourly run fired,
+        # pushing the real wait past an hour. Confirmed live: a base-4h batch
+        # from 00:05 was still 'pending' at 01:04 despite the 00:12 cycle
+        # having run and completed in <1s — it genuinely never saw them.
+        # Offset (:02/:12/.../:52) keeps the existing :12 anchor and avoids
+        # :05/:30, the two minutes M4/M16 and M15 do heavy inference on —
+        # same precaution as the execution.py fix, though risk_check itself
+        # is lightweight (no ML model, ~30MB RSS) so this is belt-and-braces.
+        CronTrigger(minute='2,12,22,32,42,52', timezone='UTC'),
         id='risk_check_1h',
-        name='Risk Check — 1H cycle',
+        name='Risk Check — 10min cycle',
         max_instances=1,
         coalesce=True,
-        misfire_grace_time=3600,
+        misfire_grace_time=120,
     )
     scheduler.start()
-    logger.info('Risk Check scheduler started — every hour at :12 UTC')
+    logger.info('Risk Check scheduler started — every 10min (:02/:12/.../:52) UTC')
 
     try:
         while True:
